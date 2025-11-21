@@ -10,6 +10,10 @@
 #include <mysql/mysql.h>
 
 #define BUFFER_SIZE 4096
+#define MAX_CONCURRENT_UPLOADS 3
+
+// Rate limiting: Track active uploads globally
+static int active_uploads = 0;
 
 // Hàm tách token an toàn
 static char *next_token(char **ptr) {
@@ -37,7 +41,7 @@ void process_command(int idx, const char *line, int line_len) {
             char *second_space = strchr(first_space + 1, ' ');
             if (second_space) {
                 // Thay password bằng ***
-                strcpy(second_space + 1, "***");
+                snprintf(second_space + 1, safe_log + sizeof(safe_log) - (second_space + 1), "***");
             }
         }
     }
@@ -62,8 +66,8 @@ void process_command(int idx, const char *line, int line_len) {
     // 2️⃣ REGISTER username password
     // ============================
     if (strcasecmp(cmd, "REGISTER") == 0) {
-        char *username = strtok(NULL, " \r\n");
-        char *password = strtok(NULL, " \r\n");
+        char *username = next_token(&ptr);
+        char *password = next_token(&ptr);
 
         if (!username || !password) {
             snprintf(response, sizeof(response), "400\r\n");
@@ -83,8 +87,8 @@ void process_command(int idx, const char *line, int line_len) {
     // 3️⃣ LOGIN username password
     // ============================
     if (strcasecmp(cmd, "LOGIN") == 0) {
-        char *username = strtok(NULL, " \r\n");
-        char *password = strtok(NULL, " \r\n");
+        char *username = next_token(&ptr);
+        char *password = next_token(&ptr);
 
         if (!username || !password) {
             snprintf(response, sizeof(response), "400\r\n");
@@ -104,7 +108,7 @@ void process_command(int idx, const char *line, int line_len) {
     // 4️⃣ VERIFY_TOKEN token
     // ============================
     if (strcasecmp(cmd, "VERIFY_TOKEN") == 0) {
-        char *token = strtok(NULL, " \r\n");
+        char *token = next_token(&ptr);
 
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");
@@ -130,7 +134,7 @@ void process_command(int idx, const char *line, int line_len) {
     // 5️⃣ LOGOUT token
     // ============================
     if (strcasecmp(cmd, "LOGOUT") == 0) {
-        char *token = strtok(NULL, " \r\n");
+        char *token = next_token(&ptr);
 
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");

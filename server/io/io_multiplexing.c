@@ -51,10 +51,14 @@ void run_server_loop(int server_sock) {
             socklen_t len = sizeof(client_addr);
             int client_sock =
                 accept(server_sock, (struct sockaddr *)&client_addr, &len);
-
+                set_nonblocking(client_sock);
             if (client_sock >= 0) {
                 int idx = add_client(client_sock);
-                printf("New client idx=%d fd=%d\n", idx, client_sock);
+                if (idx < 0) {
+                    close(client_sock);
+                } else {
+                    printf("New client idx=%d fd=%d\n", idx, client_sock);
+                }
             }
         }
 

@@ -1,0 +1,2 @@
+*.o
+server/auth/authenticated_handlers_example.c
