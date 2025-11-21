@@ -14,13 +14,20 @@
 
 void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl F_GETFL");
+        return;
+    }
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 int main() {
     init_mysql();
     int server_sock = socket(AF_INET, SOCK_STREAM, 0);
-
+    if (server_sock < 0) {
+        perror("socket");
+        exit(1);
+    }
     set_nonblocking(server_sock);
 
     int opt = 1;
@@ -33,8 +40,14 @@ int main() {
     addr.sin_port = htons(PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(server_sock, (struct sockaddr *)&addr, sizeof(addr));
-    listen(server_sock, BACKLOG);
+    if (bind(server_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        exit(1);
+    }
+    if (listen(server_sock, BACKLOG) < 0) {
+        perror("listen");
+        exit(1);
+    }
 
     init_clients();
 
