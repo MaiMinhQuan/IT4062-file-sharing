@@ -1,8 +1,17 @@
 CC = gcc
-CFLAGS = -Wall -I/usr/include/openssl -I./database -I./user -I./group -I./file -I./token -g
-LIBS = -lmysqlclient -lcrypto -lssl
+CFLAGS = -Wall -g
+LIBS = -lmysqlclient -lssl -lcrypto
 
-SERVER_SRCS = server.c database/db.c
+SERVER_SRCS = main.c \
+              database/db.c \
+              auth/auth.c \
+              auth/hash.c \
+              auth/token.c \
+              io/io_multiplexing.c \
+              net/client.c \
+              net/stream.c \
+              protocol/command.c
+
 SERVER_OBJS = $(SERVER_SRCS:.c=.o)
 
 CLIENT_SRCS = client.c
@@ -21,5 +30,6 @@ client: $(CLIENT_OBJS)
 
 clean:
 	rm -f $(SERVER_OBJS) $(CLIENT_OBJS) server client
+	rm -f auth/*.o database/*.o io/*.o net/*.o protocol/*.o
 
 .PHONY: clean all
