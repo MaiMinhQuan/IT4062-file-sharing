@@ -10,6 +10,10 @@
 #include <mysql/mysql.h>
 
 #define BUFFER_SIZE 4096
+#define MAX_CONCURRENT_UPLOADS 3
+
+// Rate limiting: Track active uploads globally
+static int active_uploads = 0;
 
 // Hàm tách token an toàn
 static char *next_token(char **ptr) {
