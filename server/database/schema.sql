@@ -101,3 +101,58 @@ CREATE TABLE IF NOT EXISTS activity_log (
     FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (group_id) REFERENCES `groups`(group_id)
 );
+
+-- ============================================
+-- Stored Procedures
+-- ============================================
+
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS create_group$$
+CREATE PROCEDURE create_group(
+    IN p_group_name VARCHAR(100),
+    IN p_description TEXT,
+    IN p_user_id INT
+)
+BEGIN
+    DECLARE new_group_id INT;
+    DECLARE new_dir_id INT;
+
+    INSERT INTO `groups` (group_name, `description`, created_by, root_dir_id, created_at)
+    VALUES (p_group_name, p_description, p_user_id, NULL, NOW());
+
+    SET new_group_id = LAST_INSERT_ID();
+
+    INSERT INTO directories (dir_name, parent_dir_id, group_id, created_by, created_at)
+    VALUES ('Root', NULL, new_group_id, p_user_id, NOW());
+
+    SET new_dir_id = LAST_INSERT_ID();
+
+    UPDATE `groups`
+    SET root_dir_id = new_dir_id
+    WHERE group_id = new_group_id;
+
+    INSERT INTO user_groups (user_id, group_id, role, joined_at)
+    VALUES (p_user_id, new_group_id, 'admin', NOW());
+
+    SELECT new_group_id AS group_id;
+END$$
+
+DROP PROCEDURE IF EXISTS get_user_groups$$
+CREATE PROCEDURE get_user_groups(
+    IN p_user_id INT
+)
+BEGIN
+    SELECT 
+        g.group_id,
+        g.group_name,
+        COALESCE(g.description, '') AS description,
+        ug.role,
+        g.created_at
+    FROM `groups` g
+    JOIN user_groups ug ON g.group_id = ug.group_id
+    WHERE ug.user_id = p_user_id
+    ORDER BY g.created_at DESC;
+END$$
+
+DELIMITER ;
