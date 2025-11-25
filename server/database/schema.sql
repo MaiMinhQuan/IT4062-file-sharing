@@ -10,15 +10,25 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Bảng Sessions/Tokens
+CREATE TABLE IF NOT EXISTS user_sessions (
+    session_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    token VARCHAR(255) NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
 -- Bảng Groups
 CREATE TABLE IF NOT EXISTS `groups` (
     group_id INT AUTO_INCREMENT PRIMARY KEY,
     group_name VARCHAR(100) NOT NULL UNIQUE,
     description TEXT,
-    created_by INT NOT NULL,
+    created_by INT NOT NULL,       -- ID người tạo nhóm
     root_dir_id INT DEFAULT NULL,  -- ID thư mục gốc của nhóm
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (created_by) REFERENCES users(user_id) ON DELETE CASCADE
+    FOREIGN KEY (created_by) REFERENCES users(user_id)
 );
 
 -- Bảng User_Groups
@@ -28,56 +38,6 @@ CREATE TABLE IF NOT EXISTS user_groups (
     role ENUM('member', 'admin') NOT NULL DEFAULT 'member',
     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, group_id),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (group_id) REFERENCES `groups`(group_id) ON DELETE CASCADE
-);
-
--- Bảng Directories
-CREATE TABLE IF NOT EXISTS directories (
-    dir_id INT AUTO_INCREMENT PRIMARY KEY,
-    dir_name VARCHAR(100) NOT NULL,
-    parent_dir_id INT DEFAULT NULL,  -- ID thư mục cha - cho phép cấu trúc cây
-                                     -- NULL = root directory
-    group_id INT NOT NULL,
-    created_by INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (parent_dir_id) REFERENCES directories(dir_id) ON DELETE CASCADE,
-    FOREIGN KEY (group_id) REFERENCES `groups`(group_id) ON DELETE CASCADE,
-    FOREIGN KEY (created_by) REFERENCES users(user_id)
-);
-
--- Bảng Files
-CREATE TABLE IF NOT EXISTS files (
-    file_id INT AUTO_INCREMENT PRIMARY KEY,
-    file_name VARCHAR(255) NOT NULL,
-    file_path VARCHAR(500) NOT NULL,  -- Đường dẫn vật lý
-    file_size BIGINT NOT NULL,
-    dir_id INT NOT NULL,
-    group_id INT NOT NULL,
-    uploaded_by INT NOT NULL,
-    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (dir_id) REFERENCES directories(dir_id) ON DELETE CASCADE,
-    FOREIGN KEY (group_id) REFERENCES `groups`(group_id) ON DELETE CASCADE,
-    FOREIGN KEY (uploaded_by) REFERENCES users(user_id)
-);
-
--- Bảng Sessions/Tokens
-CREATE TABLE IF NOT EXISTS user_sessions (
-    session_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT NOT NULL,
-    token VARCHAR(255) NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-);
-
--- Bảng log hoạt động của nhóm
-CREATE TABLE IF NOT EXISTS activity_log (
-    log_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT NOT NULL,
-    description VARCHAR(100) NOT NULL, -- Mô tả hành động (ví dụ: 'upload_file', 'create_directory')
-    group_id INT NOT NULL,  -- Lưu group_id của nhóm mà người dùng đã thực hiện hành động
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (group_id) REFERENCES `groups`(group_id)
 );
@@ -91,6 +51,53 @@ CREATE TABLE IF NOT EXISTS group_requests (
     status ENUM('pending', 'accepted', 'rejected') NOT NULL DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    FOREIGN KEY (group_id) REFERENCES `groups`(group_id)
+);
+
+-- Bảng Directories
+CREATE TABLE IF NOT EXISTS directories (
+    dir_id INT AUTO_INCREMENT PRIMARY KEY,
+    dir_name VARCHAR(100) NOT NULL,
+    parent_dir_id INT DEFAULT NULL,  -- ID thư mục cha - cho phép cấu trúc cây
+                                     -- NULL = root directory
+    group_id INT NOT NULL,
+    created_by INT NOT NULL,
+    is_deleted BOOLEAN DEFAULT FALSE,  -- Soft delete
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL,
+    FOREIGN KEY (parent_dir_id) REFERENCES directories(dir_id),
+    FOREIGN KEY (group_id) REFERENCES `groups`(group_id),
+    FOREIGN KEY (created_by) REFERENCES users(user_id)
+);
+
+-- Bảng Files
+CREATE TABLE IF NOT EXISTS files (
+    file_id INT AUTO_INCREMENT PRIMARY KEY,
+    file_name VARCHAR(255) NOT NULL,
+    file_path VARCHAR(500) NOT NULL,  -- Đường dẫn vật lý của file trên server
+    file_size BIGINT NOT NULL,
+    file_type VARCHAR(100),             -- Loại file (ví dụ: 'image/png', 'application/pdf')
+    dir_id INT NOT NULL,
+    group_id INT NOT NULL,
+    uploaded_by INT NOT NULL,           -- ID người upload file
+    is_deleted BOOLEAN DEFAULT FALSE,  -- Soft delete
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL,
+    FOREIGN KEY (dir_id) REFERENCES directories(dir_id),
+    FOREIGN KEY (group_id) REFERENCES `groups`(group_id),
+    FOREIGN KEY (uploaded_by) REFERENCES users(user_id)
+);
+
+-- Bảng log hoạt động của nhóm
+CREATE TABLE IF NOT EXISTS activity_log (
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    description VARCHAR(100) NOT NULL, -- Mô tả hành động (ví dụ: 'upload_file', 'create_directory')
+    group_id INT NOT NULL,  -- Lưu group_id của nhóm mà người dùng đã thực hiện hành động
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (group_id) REFERENCES `groups`(group_id)
 );
