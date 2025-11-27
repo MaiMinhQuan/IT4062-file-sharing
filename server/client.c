@@ -18,6 +18,11 @@ char current_token[TOKEN_LENGTH + 1] = {0};
 // Global socket - persistent connection
 int global_sock = -1;
 
+// Forward declarations
+int connect_to_server();
+void handle_create_group();
+void handle_list_groups();
+
 // Kiểm tra token còn hợp lệ hay không
 int is_token_valid() {
     // Nếu không có token thì chưa login
@@ -78,12 +83,16 @@ void get_password(char *password, int size) {
 }
 
 void print_menu() {
+    int logged_in = is_token_valid();
+
     printf("\n========== FILE SHARING CLIENT ==========\n");
-    if (is_token_valid()) {
+    if (logged_in) {
         printf("Trạng thái: ✓ Đã đăng nhập\n");
         printf("=========================================\n");
-        printf("1. Logout (Đăng xuất)\n");
-        printf("2. Exit (Thoát)\n");
+        printf("1. Create Group (Tạo nhóm)\n");
+        printf("2. View My Groups (Xem nhóm)\n");
+        printf("3. Logout (Đăng xuất)\n");
+        printf("4. Exit (Thoát)\n");
     } else {
         printf("Trạng thái: ✗ Chưa đăng nhập\n");
         printf("=========================================\n");
@@ -273,6 +282,172 @@ void handle_logout() {
     }
 }
 
+void sanitize_pipe(char *str) {
+    if (!str) return;
+    for (size_t i = 0; str[i]; ++i) {
+        if (str[i] == '|') {
+            str[i] = '/';
+        }
+    }
+}
+
+void handle_create_group() {
+    if (!is_token_valid()) {
+        printf("Bạn cần đăng nhập trước khi tạo nhóm!\n");
+        return;
+    }
+
+    while (getchar() != '\n');
+
+    char group_name[256];
+    char description[1024];
+
+    printf("\n--- TẠO NHÓM MỚI ---\n");
+    printf("Tên nhóm: ");
+    if (!fgets(group_name, sizeof(group_name), stdin)) {
+        printf("Không đọc được tên nhóm.\n");
+        return;
+    }
+    group_name[strcspn(group_name, "\n")] = 0;
+
+    printf("Mô tả: ");
+    if (!fgets(description, sizeof(description), stdin)) {
+        printf("Không đọc được mô tả.\n");
+        return;
+    }
+    description[strcspn(description, "\n")] = 0;
+
+    if (strlen(group_name) == 0) {
+        printf("Tên nhóm không được để trống.\n");
+        return;
+    }
+
+    sanitize_pipe(group_name);
+    sanitize_pipe(description);
+
+    int sock = connect_to_server();
+    if (sock < 0) {
+        printf("Không thể kết nối đến server!\n");
+        return;
+    }
+
+    char command[BUFFER_SIZE];
+    snprintf(command, sizeof(command), "CREATE_GROUP %s|%s|%s\r\n",
+             current_token, group_name, description);
+    send(sock, command, strlen(command), 0);
+
+    char response[BUFFER_SIZE] = {0};
+    int bytes = recv(sock, response, sizeof(response) - 1, 0);
+    if (bytes <= 0) {
+        printf("Không nhận được phản hồi từ server.\n");
+        return;
+    }
+    response[bytes] = '\0';
+
+    int status_code = 0;
+    int group_id = 0;
+    if (sscanf(response, "%d %d", &status_code, &group_id) < 1) {
+        printf("Phản hồi không hợp lệ: %s\n", response);
+        return;
+    }
+
+    if(status_code == 200) {
+        printf("✓ Tạo nhóm thành công! group_id = %d\n", group_id);
+    }else{
+        printf("✗ Lỗi server (%d).\n", status_code);
+    }
+}
+
+void handle_list_groups() {
+    if (!is_token_valid()) {
+        printf("Bạn cần đăng nhập để xem nhóm của mình!\n");
+        return;
+    }
+
+    int sock = connect_to_server();
+    if (sock < 0) {
+        printf("Không thể kết nối đến server!\n");
+        return;
+    }
+
+    char command[BUFFER_SIZE];
+    snprintf(command, sizeof(command), "LIST_GROUPS_JOINED %s\r\n", current_token);
+    send(sock, command, strlen(command), 0);
+
+    char response[BUFFER_SIZE] = {0};
+    int bytes = recv(sock, response, sizeof(response) - 1, 0);
+    if (bytes <= 0) {
+        printf("Không nhận được phản hồi từ server.\n");
+        return;
+    }
+    response[bytes] = '\0';
+
+    int status_code = 0;
+    int group_count = 0;
+    sscanf(response, "%d %d", &status_code, &group_count);
+
+    if(status_code == 200) {
+        printf("✓ Xem nhóm thành công! group_count = %d\n", group_count);
+    }else{
+        printf("✗ Lỗi server (%d).\n", status_code);
+        return;
+    }
+
+    printf("\nBạn đang ở trong %d nhóm:\n", group_count);
+    if (group_count == 0) {
+        return;
+    }
+
+    const char *table_border =
+        "+------+----------------------------+--------------+---------------------+--------------------------------+\n";
+    printf("%s", table_border);
+    printf("| %-4s | %-28s | %-13s | %-22s | %-33s |\n",
+        "ID", "Tên nhóm", "Vai trò", "Tạo ngày", "Mô tả"); 
+    printf("%s", table_border);
+
+    char *list_start = strstr(response, "\r\n");
+    if (!list_start) {
+        return;
+    }
+    list_start += 2;
+
+    while (*list_start) {
+        char *next_line = strstr(list_start, "\r\n");
+        if (next_line) {
+            *next_line = '\0';
+        }
+
+        if (strlen(list_start) == 0) {
+            if (!next_line) break;
+            list_start = next_line + 2;
+            continue;
+        }
+
+        char line_copy[BUFFER_SIZE];
+        strncpy(line_copy, list_start, sizeof(line_copy) - 1);
+        line_copy[sizeof(line_copy) - 1] = '\0';
+
+        char *group_id = strtok(line_copy, "|");
+        char *group_name = strtok(NULL, "|");
+        char *role = strtok(NULL, "|");
+        char *created_at = strtok(NULL, "|");
+        char *description = strtok(NULL, "|");
+
+        const char *safe_id = group_id ? group_id : "?";
+        const char *safe_name = group_name && strlen(group_name) > 0 ? group_name : "(không tên)";
+        const char *safe_role = role && strlen(role) > 0 ? role : "member";
+        const char *safe_created = created_at && strlen(created_at) > 0 ? created_at : "-";
+        const char *safe_desc = (description && strlen(description) > 0) ? description : "(không mô tả)";
+
+        printf("| %-4.4s | %-26.26s | %-12.12s | %-19.19s | %-30s |\n",
+               safe_id, safe_name, safe_role, safe_created, safe_desc);
+
+        if (!next_line) break;
+        list_start = next_line + 2;
+    }
+
+    printf("%s", table_border);
+}
 int main() {
     int choice;
 
@@ -292,9 +467,15 @@ int main() {
             // Menu khi đã login
             switch (choice) {
                 case 1:
-                    handle_logout();
+                    handle_create_group();
                     break;
                 case 2:
+                    handle_list_groups();
+                    break;
+                case 3:
+                    handle_logout();
+                    break;
+                case 4:
                     printf("Tạm biệt!\n");
                     if (global_sock > 0) {
                         close(global_sock);
