@@ -143,7 +143,7 @@ CREATE PROCEDURE get_user_groups(
     IN p_user_id INT
 )
 BEGIN
-    SELECT 
+    SELECT
         g.group_id,
         g.group_name,
         COALESCE(g.description, '') AS description,
@@ -153,6 +153,212 @@ BEGIN
     JOIN user_groups ug ON g.group_id = ug.group_id
     WHERE ug.user_id = p_user_id
     ORDER BY g.created_at DESC;
+END$$
+
+DROP PROCEDURE IF EXISTS request_join_group$$
+CREATE PROCEDURE request_join_group(
+    IN p_user_id INT,
+    IN p_group_id INT,
+    OUT result_code INT
+)
+request_join_group: BEGIN
+    DECLARE group_exists INT DEFAULT 0;
+    DECLARE already_member INT DEFAULT 0;
+    DECLARE pending_request INT DEFAULT 0;
+
+    -- Kiểm tra nhóm có tồn tại không
+    SELECT COUNT(*) INTO group_exists
+    FROM `groups`
+    WHERE group_id = p_group_id;
+
+    IF group_exists = 0 THEN
+        SET result_code = 404; -- Nhóm không tồn tại
+        LEAVE request_join_group;
+    END IF;
+
+    -- Kiểm tra đã là thành viên chưa
+    SELECT COUNT(*) INTO already_member
+    FROM user_groups
+    WHERE user_id = p_user_id AND group_id = p_group_id;
+
+    IF already_member > 0 THEN
+        SET result_code = 409; -- Đã là thành viên của nhóm
+        LEAVE request_join_group;
+    END IF;
+
+    -- Kiểm tra đã gửi yêu cầu trước đó chưa
+    SELECT COUNT(*) INTO pending_request
+    FROM group_requests
+    WHERE user_id = p_user_id
+      AND group_id = p_group_id
+      AND request_type = 'join_request'
+      AND status = 'pending';
+
+    IF pending_request > 0 THEN
+        SET result_code = 423; -- Đã gửi yêu cầu trước đó
+        LEAVE request_join_group;
+    END IF;
+
+    -- Tạo yêu cầu mới
+    INSERT INTO group_requests (user_id, group_id, request_type, status, created_at)
+    VALUES (p_user_id, p_group_id, 'join_request', 'pending', NOW());
+
+    SET result_code = 200; -- Gửi yêu cầu thành công
+END$$
+
+DROP PROCEDURE IF EXISTS check_admin$$
+CREATE PROCEDURE check_admin(
+    IN p_user_id INT,
+    IN p_group_id INT,
+    OUT result_code INT
+)
+check_admin: BEGIN
+    DECLARE group_exists INT DEFAULT 0;
+    DECLARE is_admin INT DEFAULT 0;
+    DECLARE is_member INT DEFAULT 0;
+
+    -- Kiểm tra nhóm có tồn tại không
+    SELECT COUNT(*) INTO group_exists
+    FROM `groups`
+    WHERE group_id = p_group_id;
+
+    IF group_exists = 0 THEN
+        SET result_code = 404; -- Nhóm không tồn tại
+        LEAVE check_admin;
+    END IF;
+
+    -- Kiểm tra user có phải là thành viên không
+    SELECT COUNT(*) INTO is_member
+    FROM user_groups
+    WHERE user_id = p_user_id AND group_id = p_group_id;
+
+    IF is_member = 0 THEN
+        SET result_code = 403; -- User chỉ là thành viên (không phải admin)
+        LEAVE check_admin;
+    END IF;
+
+    -- Kiểm tra user có phải là admin không
+    SELECT COUNT(*) INTO is_admin
+    FROM user_groups
+    WHERE user_id = p_user_id AND group_id = p_group_id AND role = 'admin';
+
+    IF is_admin > 0 THEN
+        SET result_code = 200; -- User là admin của nhóm
+    ELSE
+        SET result_code = 403; -- User chỉ là thành viên (không phải admin)
+    END IF;
+END$$
+
+DROP PROCEDURE IF EXISTS handle_join_request$$
+CREATE PROCEDURE handle_join_request(
+    IN p_admin_user_id INT,
+    IN p_request_id INT,
+    IN p_option VARCHAR(10),
+    OUT result_code INT
+)
+handle_join_request: BEGIN
+    DECLARE req_user_id INT DEFAULT 0;
+    DECLARE req_group_id INT DEFAULT 0;
+    DECLARE req_status VARCHAR(20);
+    DECLARE is_admin INT DEFAULT 0;
+    DECLARE request_exists INT DEFAULT 0;
+
+    -- Kiểm tra yêu cầu có tồn tại không
+    SELECT COUNT(*) INTO request_exists
+    FROM group_requests
+    WHERE request_id = p_request_id AND request_type = 'join_request';
+
+    IF request_exists = 0 THEN
+        SET result_code = 404; -- Nhóm không tồn tại
+        LEAVE handle_join_request;
+    END IF;
+
+    -- Lấy thông tin yêu cầu
+    SELECT user_id, group_id, status
+    INTO req_user_id, req_group_id, req_status
+    FROM group_requests
+    WHERE request_id = p_request_id AND request_type = 'join_request';
+
+    -- Kiểm tra người xử lý có quyền admin không
+    SELECT COUNT(*) INTO is_admin
+    FROM user_groups
+    WHERE user_id = p_admin_user_id AND group_id = req_group_id AND role = 'admin';
+
+    IF is_admin = 0 THEN
+        SET result_code = 403; -- Người dùng không có quyền xét duyệt
+        LEAVE handle_join_request;
+    END IF;
+
+    -- Kiểm tra yêu cầu đã là thành viên chưa
+    IF req_status != 'pending' THEN
+        SET result_code = 409; -- Đã là thành viên của nhóm
+        LEAVE handle_join_request;
+    END IF;
+
+    -- Xử lý theo option
+    IF p_option = 'accepted' THEN
+        -- Cập nhật trạng thái yêu cầu
+        UPDATE group_requests
+        SET status = 'accepted', updated_at = NOW()
+        WHERE request_id = p_request_id;
+
+        -- Thêm user vào nhóm
+        INSERT INTO user_groups (user_id, group_id, role, joined_at)
+        VALUES (req_user_id, req_group_id, 'member', NOW());
+
+        SET result_code = 200; -- Xử lý yêu cầu thành công
+    ELSEIF p_option = 'rejected' THEN
+        -- Cập nhật trạng thái yêu cầu
+        UPDATE group_requests
+        SET status = 'rejected', updated_at = NOW()
+        WHERE request_id = p_request_id;
+
+        SET result_code = 200; -- Xử lý yêu cầu thành công
+    ELSE
+        SET result_code = 400; -- Option không hợp lệ
+    END IF;
+END$$
+
+DROP PROCEDURE IF EXISTS get_groups_not_joined$$
+CREATE PROCEDURE get_groups_not_joined(
+    IN p_user_id INT
+)
+BEGIN
+    SELECT
+        g.group_id,
+        g.group_name,
+        COALESCE(g.description, '') AS description,
+        u.username AS admin_name,
+        g.created_at
+    FROM `groups` g
+    JOIN users u ON g.created_by = u.user_id
+    WHERE g.group_id NOT IN (
+        SELECT group_id FROM user_groups WHERE user_id = p_user_id
+    )
+    ORDER BY g.created_at DESC;
+END$$
+
+DROP PROCEDURE IF EXISTS get_pending_requests_for_admin$$
+CREATE PROCEDURE get_pending_requests_for_admin(
+    IN p_admin_user_id INT
+)
+BEGIN
+    SELECT
+        gr.request_id,
+        gr.user_id,
+        u.username,
+        gr.group_id,
+        g.group_name,
+        gr.created_at
+    FROM group_requests gr
+    JOIN users u ON gr.user_id = u.user_id
+    JOIN `groups` g ON gr.group_id = g.group_id
+    WHERE gr.request_type = 'join_request'
+      AND gr.status = 'pending'
+      AND gr.group_id IN (
+          SELECT group_id FROM user_groups WHERE user_id = p_admin_user_id AND role = 'admin'
+      )
+    ORDER BY g.group_id, gr.created_at ASC;
 END$$
 
 DELIMITER ;
