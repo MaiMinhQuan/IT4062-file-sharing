@@ -9,7 +9,7 @@
 #include "io/io_multiplexing.h"
 #include "net/client.h"
 #include "database/db.h"
-#define PORT 1234
+#define PORT 3000
 #define BACKLOG 10
 
 void set_nonblocking(int fd) {

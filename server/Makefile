@@ -1,5 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -g
+CFLAGS = -Wall -g -I/opt/homebrew/opt/mysql/include -I/opt/homebrew/opt/openssl@3/include -I./database -I./auth -I./io -I./net -I./protocol
+LDFLAGS = -L/opt/homebrew/opt/mysql/lib -L/opt/homebrew/opt/openssl@3/lib
 LIBS = -lmysqlclient -lssl -lcrypto
 
 SERVER_SRCS = main.c \
@@ -20,7 +21,7 @@ CLIENT_OBJS = $(CLIENT_SRCS:.c=.o)
 all: server client
 
 server: $(SERVER_OBJS)
-	$(CC) $(SERVER_OBJS) -o server $(LIBS)
+	$(CC) $(SERVER_OBJS) -o server $(LDFLAGS) $(LIBS)
 
 client: $(CLIENT_OBJS)
 	$(CC) $(CLIENT_OBJS) -o client
