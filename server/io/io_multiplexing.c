@@ -10,8 +10,21 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
+#include <fcntl.h>
 
 #define BUFFER_SIZE 4096
+
+// Hàm đặt socket ở chế độ non-blocking (bản cục bộ cho module này)
+static void set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl F_GETFL");
+        return;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl F_SETFL");
+    }
+}
 
 void run_server_loop(int server_sock) {
     fd_set readfds, writefds;
