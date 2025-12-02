@@ -4,7 +4,7 @@
 #include <sys/socket.h>
 
 #define BUFFER_SIZE 24576
-#define SEND_BUFFER_SIZE 32768
+#define SEND_BUFFER_SIZE 65536  // 64KB - enough for 2 download chunks
 #define MAX_CLIENTS 30
 
 typedef struct {
@@ -17,6 +17,7 @@ typedef struct {
     int send_offset;
 
     int authenticated;
+    int user_id;  // ID của user sau khi đăng nhập
 } Client;
 
 extern Client clients[MAX_CLIENTS];

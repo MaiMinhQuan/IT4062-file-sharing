@@ -13,14 +13,14 @@
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 1234
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 24576  // 24KB to match server buffer
 #define TOKEN_LENGTH 32
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
-#define FILE_CHUNK_SIZE 2048
+#define FILE_CHUNK_SIZE 4096  // 4KB for testing
 #define BASE64_ENCODED_SIZE (((FILE_CHUNK_SIZE + 2) / 3) * 4 + 4)
 #define UPLOAD_COMMAND_BUFFER (BASE64_ENCODED_SIZE + 512)
 #define DOWNLOAD_RESPONSE_BUFFER (BASE64_ENCODED_SIZE + 512)
@@ -622,7 +622,7 @@ void handle_list_groups() {
         "└──────┴──────────────────────────────┴──────────┴─────────────────────┴──────────────────────────────┘\n";
 
     printf("%s", table_border);
-    printf("│ %-4s │ %-29s │ %-10s │ %-24s │ %-28s │\n",
+    printf("│ %-4s │ %-30s │ %-9s │ %-22s │ %-31s │\n",
         "ID", "Tên nhóm", "Vai trò", "Ngày tạo", "Mô tả");
     printf("%s", table_separator);
 

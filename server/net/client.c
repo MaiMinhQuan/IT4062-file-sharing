@@ -11,6 +11,7 @@ void init_clients() {
         clients[i].send_len = 0;
         clients[i].send_offset = 0;
         clients[i].authenticated = 0;
+        clients[i].user_id = 0;
     }
 }
 
@@ -22,6 +23,7 @@ int add_client(int sock) {
             clients[i].send_len = 0;
             clients[i].send_offset = 0;
             clients[i].authenticated = 0;
+            clients[i].user_id = 0;
             return i;
         }
     }
@@ -37,4 +39,5 @@ void remove_client_index(int idx) {
     clients[idx].send_len = 0;
     clients[idx].send_offset = 0;
     clients[idx].authenticated = 0;
+    clients[idx].user_id = 0;
 }

@@ -2,6 +2,7 @@
 #include "../net/client.h"
 #include "../net/stream.h"
 #include "../protocol/command.h"
+#include "../utils/logger.h"
 
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -11,8 +12,6 @@
 #include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
-
-#define BUFFER_SIZE 4096
 
 // Hàm đặt socket ở chế độ non-blocking (bản cục bộ cho module này)
 static void set_nonblocking(int fd) {
@@ -70,7 +69,10 @@ void run_server_loop(int server_sock) {
                 if (idx < 0) {
                     close(client_sock);
                 } else {
-                    printf("New client idx=%d fd=%d\n", idx, client_sock);
+                    char client_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+                    log_conn(idx, "New connection from %s:%d (fd=%d)", 
+                            client_ip, ntohs(client_addr.sin_port), client_sock);
                 }
             }
         }
@@ -79,6 +81,7 @@ void run_server_loop(int server_sock) {
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].sock > 0 && FD_ISSET(clients[i].sock, &writefds)) {
                 if (flush_send(i) < 0) {
+                    log_disc(i, "Client disconnected (send error)");
                     remove_client_index(i);
                 }
             }
@@ -94,6 +97,7 @@ void run_server_loop(int server_sock) {
 
                 if (bytes > 0) {
                     if (clients[i].recv_len + bytes > BUFFER_SIZE) {
+                        log_disc(i, "Client disconnected (buffer overflow)");
                         remove_client_index(i);
                         continue;
                     }
@@ -119,6 +123,7 @@ void run_server_loop(int server_sock) {
                     }
                 }
                 else {
+                    log_disc(i, "Client disconnected (connection closed)");
                     remove_client_index(i);
                 }
             }
