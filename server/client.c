@@ -12,7 +12,7 @@
 #include <ctype.h>
 
 #define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 3000
+#define SERVER_PORT 1234
 #define BUFFER_SIZE 4096
 #define TOKEN_LENGTH 32
 
@@ -606,11 +606,11 @@ void handle_list_groups() {
         return;
     }
 
-    printf("\n📂 DANH SÁCH NHÓM CỦA BẠN (%d nhóm)\n\n", group_count);
+    printf("\n DANH SÁCH NHÓM CỦA BẠN (%d nhóm)\n\n", group_count);
 
     if (group_count == 0) {
-        printf("⚠️  Bạn chưa tham gia nhóm nào.\n");
-        printf("ℹ️  Sử dụng chức năng 1 để tạo nhóm mới hoặc chức năng 3 để xin tham gia nhóm.\n");
+        printf("  Bạn chưa tham gia nhóm nào.\n");
+        printf("  Sử dụng chức năng 1 để tạo nhóm mới hoặc chức năng 3 để xin tham gia nhóm.\n");
         return;
     }
 
@@ -717,8 +717,8 @@ void handle_request_join_group() {
     printf("📋 DANH SÁCH CÁC NHÓM CÓ THỂ THAM GIA (%d nhóm)\n", group_count);
 
     if (group_count == 0) {
-        printf("\n⚠️  Không có nhóm nào để tham gia.\n");
-        printf("ℹ️  Bạn đã là thành viên của tất cả các nhóm hoặc chưa có nhóm nào được tạo.\n");
+        printf("\n  Không có nhóm nào để tham gia.\n");
+        printf("  Bạn đã là thành viên của tất cả các nhóm hoặc chưa có nhóm nào được tạo.\n");
         return;
     }
 
@@ -826,15 +826,15 @@ void handle_request_join_group() {
         printf("\n");
         switch (status_code) {
             case 200:
-                printf("✅ Gửi yêu cầu tham gia nhóm #%d thành công!\n", group_id);
-                printf("ℹ️  Yêu cầu của bạn đang chờ admin phê duyệt.\n");
+                printf(" Gửi yêu cầu tham gia nhóm #%d thành công!\n", group_id);
+                printf("  Yêu cầu của bạn đang chờ admin phê duyệt.\n");
                 break;
             case 409:
                 printf("✗ Bạn đã là thành viên của nhóm #%d rồi!\n", group_id);
                 break;
             case 423:
-                printf("⚠️  Bạn đã gửi yêu cầu tham gia nhóm #%d trước đó.\n", group_id);
-                printf("ℹ️  Vui lòng chờ admin phê duyệt.\n");
+                printf("  Bạn đã gửi yêu cầu tham gia nhóm #%d trước đó.\n", group_id);
+                printf("ℹ  Vui lòng chờ admin phê duyệt.\n");
                 break;
             case 404:
                 printf("✗ Nhóm với ID %d không tồn tại!\n", group_id);
@@ -896,8 +896,8 @@ void handle_view_pending_requests() {
         }
 
         if (request_count == 0) {
-            printf("\n⚠️  Không có yêu cầu nào đang chờ duyệt.\n");
-            printf("ℹ️  Bạn chưa có yêu cầu nào cần xét duyệt trong các nhóm bạn quản lý.\n");
+            printf("\n  Không có yêu cầu nào đang chờ duyệt.\n");
+            printf("  Bạn chưa có yêu cầu nào cần xét duyệt trong các nhóm bạn quản lý.\n");
             return;
         }
 
@@ -1055,14 +1055,14 @@ void handle_view_pending_requests() {
                 case 200:
                     if (strcmp(action, "accepted") == 0) {
                         printf("✅ Đã chấp nhận yêu cầu #%d thành công!\n", request_id);
-                        printf("ℹ️  User đã được thêm vào nhóm.\n");
+                        printf("  User đã được thêm vào nhóm.\n");
                     } else {
                         printf("✅ Đã từ chối yêu cầu #%d thành công!\n", request_id);
                     }
                     break;
                 case 403:
                     printf("✗ Bạn không có quyền xét duyệt yêu cầu này!\n");
-                    printf("ℹ️  Chỉ admin của nhóm mới có thể xét duyệt.\n");
+                    printf("   Chỉ admin của nhóm mới có thể xét duyệt.\n");
                     break;
                 case 404:
                     printf("✗ Không tìm thấy yêu cầu với ID %d!\n", request_id);
@@ -1175,7 +1175,7 @@ void handle_approve_request() {
             case 200:
                 if (strcmp(action, "accepted") == 0) {
                     printf("✓ Đã chấp nhận yêu cầu thành công!\n");
-                    printf("ℹ️  User đã được thêm vào nhóm.\n");
+                    printf("   User đã được thêm vào nhóm.\n");
                 } else {
                     printf("✓ Đã từ chối yêu cầu thành công!\n");
                 }
@@ -1185,7 +1185,7 @@ void handle_approve_request() {
                 break;
             case 403:
                 printf("✗ Bạn không có quyền xử lý yêu cầu này!\n");
-                printf("ℹ️  Chỉ admin của nhóm mới có thể phê duyệt.\n");
+                printf("   Chỉ admin của nhóm mới có thể phê duyệt.\n");
                 break;
             case 404:
                 printf("✗ Yêu cầu với ID %d không tồn tại!\n", request_id);
