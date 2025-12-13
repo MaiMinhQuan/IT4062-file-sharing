@@ -12,9 +12,6 @@
 #define BUFFER_SIZE 4096
 #define MAX_CONCURRENT_UPLOADS 3
 
-// Rate limiting: Track active uploads globally
-static int active_uploads = 0;
-
 static void trim_crlf(char *str) {
     if (!str) return;
     size_t len = strlen(str);
@@ -779,7 +776,422 @@ void process_command(int idx, const char *line, int line_len) {
         return;
     }
 
-    // ⓬ Command không tồn tại
+    // ============================
+    // ⓬ INVITE_USER_TO_GROUP token group_id user_id
+    // ============================
+    if (strcasecmp(cmd, "INVITE_USER_TO_GROUP") == 0) {
+        char *token = next_token(&ptr);
+        char *group_id_str = next_token(&ptr);
+        char *invited_user_id_str = next_token(&ptr);
+
+        if (!token || !group_id_str || !invited_user_id_str) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int admin_user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (admin_user_id < 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (admin_user_id == 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int group_id = atoi(group_id_str);
+        int invited_user_id = atoi(invited_user_id_str);
+
+        if (group_id <= 0 || invited_user_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Kiểm tra admin có phải là admin của nhóm không
+        char check_query[512];
+        snprintf(check_query, sizeof(check_query),
+                 "SELECT role FROM user_groups WHERE user_id=%d AND group_id=%d",
+                 admin_user_id, group_id);
+
+        if (mysql_query(conn, check_query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *check_res = mysql_store_result(conn);
+        if (!check_res) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW check_row = mysql_fetch_row(check_res);
+        if (!check_row) {
+            // User không thuộc nhóm
+            mysql_free_result(check_res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        const char *role = check_row[0];
+        if (strcmp(role, "admin") != 0) {
+            // User không phải admin
+            mysql_free_result(check_res);
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        mysql_free_result(check_res);
+
+        // Kiểm tra user được mời có tồn tại không
+        snprintf(check_query, sizeof(check_query),
+                 "SELECT user_id FROM users WHERE user_id=%d",
+                 invited_user_id);
+
+        if (mysql_query(conn, check_query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        check_res = mysql_store_result(conn);
+        if (!check_res || mysql_num_rows(check_res) == 0) {
+            if (check_res) mysql_free_result(check_res);
+            snprintf(response, sizeof(response), "404\r\n"); // User không tồn tại
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        mysql_free_result(check_res);
+
+        // Kiểm tra user đã là thành viên chưa
+        snprintf(check_query, sizeof(check_query),
+                 "SELECT user_id FROM user_groups WHERE user_id=%d AND group_id=%d",
+                 invited_user_id, group_id);
+
+        if (mysql_query(conn, check_query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        check_res = mysql_store_result(conn);
+        if (check_res && mysql_num_rows(check_res) > 0) {
+            // Đã là thành viên
+            mysql_free_result(check_res);
+            snprintf(response, sizeof(response), "409\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (check_res) mysql_free_result(check_res);
+
+        // Kiểm tra đã gửi lời mời trước đó chưa
+        snprintf(check_query, sizeof(check_query),
+                 "SELECT request_id FROM group_requests "
+                 "WHERE user_id=%d AND group_id=%d AND request_type='invitation' AND status='pending'",
+                 invited_user_id, group_id);
+
+        if (mysql_query(conn, check_query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        check_res = mysql_store_result(conn);
+        if (check_res && mysql_num_rows(check_res) > 0) {
+            // Đã gửi lời mời trước đó
+            mysql_free_result(check_res);
+            snprintf(response, sizeof(response), "423\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (check_res) mysql_free_result(check_res);
+
+        // Tạo lời mời
+        char insert_query[512];
+        snprintf(insert_query, sizeof(insert_query),
+                 "INSERT INTO group_requests (user_id, group_id, request_type, status) "
+                 "VALUES (%d, %d, 'invitation', 'pending')",
+                 invited_user_id, group_id);
+
+        if (mysql_query(conn, insert_query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Thành công
+        snprintf(response, sizeof(response), "200\r\n");
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓭ GET_USER_ID_BY_USERNAME username
+    // ============================
+    if (strcasecmp(cmd, "GET_USER_ID_BY_USERNAME") == 0) {
+        char *username = next_token(&ptr);
+
+        if (!username) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Tìm user_id từ username
+        char escaped_username[256];
+        mysql_real_escape_string(conn, escaped_username, username, strlen(username));
+
+        char query[512];
+        snprintf(query, sizeof(query),
+                 "SELECT user_id FROM users WHERE username='%s'",
+                 escaped_username);
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n"); // Username không tồn tại
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        int user_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Trả về user_id
+        snprintf(response, sizeof(response), "200 %d\r\n", user_id);
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓮ GET_MY_INVITATIONS token
+    // ============================
+    if (strcasecmp(cmd, "GET_MY_INVITATIONS") == 0) {
+        char *token = next_token(&ptr);
+
+        if (!token) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int requester_user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (requester_user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Lấy danh sách lời mời (status='pending', request_type='invitation')
+        char query[1024];
+        snprintf(query, sizeof(query),
+                 "SELECT gr.request_id, gr.group_id, g.group_name, "
+                 "gr.created_at "
+                 "FROM group_requests gr "
+                 "JOIN `groups` g ON gr.group_id = g.group_id "
+                 "WHERE gr.user_id=%d AND gr.status='pending' AND gr.request_type='invitation' "
+                 "ORDER BY gr.created_at DESC",
+                 requester_user_id);
+
+        if (mysql_query(conn, query) != 0) {
+            fprintf(stderr, "MySQL Error: %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res) {
+            snprintf(response, sizeof(response), "500 LIST_RECEIVED_INVITATIONS\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int num_invitations = mysql_num_rows(res);
+
+        // Build invitation list in format: [invitation_n]: group_id group_name request_id request_status
+        char invitations_str[BUFFER_SIZE];
+        invitations_str[0] = '\0';
+        size_t inv_len = 0;
+        int inv_index = 1;
+
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+            // row[0]=request_id, row[1]=group_id, row[2]=group_name, row[3]=created_at
+            const char *request_id = row[0] ? row[0] : "";
+            const char *group_id = row[1] ? row[1] : "";
+            const char *group_name = row[2] ? row[2] : "";
+
+            int written = snprintf(invitations_str + inv_len,
+                                   sizeof(invitations_str) - inv_len,
+                                   "[invitation_%d]: %s %s %s pending ",
+                                   inv_index, group_id, group_name, request_id);
+
+            if (written < 0 || (size_t)written >= sizeof(invitations_str) - inv_len) {
+                break;
+            }
+
+            inv_len += written;
+            inv_index++;
+        }
+
+        mysql_free_result(res);
+
+        // Format: "200 LIST_RECEIVED_INVITATIONS [invitation_1] [invitation_2] ... <CRLF>"
+        snprintf(response, sizeof(response), "200 LIST_RECEIVED_INVITATIONS %s\r\n", invitations_str);
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓯ RESPOND_TO_INVITATION token request_id action
+    // action: accept hoặc reject
+    // ============================
+    if (strcasecmp(cmd, "RESPOND_TO_INVITATION") == 0) {
+        char *token = next_token(&ptr);
+        char *request_id_str = next_token(&ptr);
+        char *action = next_token(&ptr);
+
+        if (!token || !request_id_str || !action) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int request_id = atoi(request_id_str);
+        if (request_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Kiểm tra action hợp lệ
+        if (strcasecmp(action, "accept") != 0 && strcasecmp(action, "reject") != 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Kiểm tra request_id có tồn tại và thuộc về user này không
+        char query[512];
+        snprintf(query, sizeof(query),
+                 "SELECT group_id, status, request_type FROM group_requests "
+                 "WHERE request_id=%d AND user_id=%d",
+                 request_id, user_id);
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n"); // Request không tồn tại
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        int group_id = atoi(row[0]);
+        const char *status = row[1];
+        const char *request_type = row[2];
+
+        // Kiểm tra request_type phải là 'invitation'
+        if (strcmp(request_type, "invitation") != 0) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "403\r\n"); // Không phải invitation
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Kiểm tra status phải là 'pending'
+        if (strcmp(status, "pending") != 0) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "409\r\n"); // Đã xử lý rồi
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        mysql_free_result(res);
+
+        if (strcasecmp(action, "accept") == 0) {
+            // Chấp nhận lời mời: thêm vào user_groups với role='member'
+            snprintf(query, sizeof(query),
+                     "INSERT INTO user_groups (user_id, group_id, role) "
+                     "VALUES (%d, %d, 'member')",
+                     user_id, group_id);
+
+            if (mysql_query(conn, query) != 0) {
+                // Có thể đã là member rồi
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            // Cập nhật status của request thành 'accepted'
+            snprintf(query, sizeof(query),
+                     "UPDATE group_requests SET status='accepted' "
+                     "WHERE request_id=%d",
+                     request_id);
+
+            if (mysql_query(conn, query) != 0) {
+                fprintf(stderr, "MySQL Error updating status to accepted: %s\n", mysql_error(conn));
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            snprintf(response, sizeof(response), "200\r\n"); // Đã chấp nhận
+        } else {
+            // Từ chối lời mời: cập nhật status thành 'rejected'
+            snprintf(query, sizeof(query),
+                     "UPDATE group_requests SET status='rejected' "
+                     "WHERE request_id=%d",
+                     request_id);
+
+            if (mysql_query(conn, query) != 0) {
+                fprintf(stderr, "MySQL Error updating status to rejected: %s\n", mysql_error(conn));
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            snprintf(response, sizeof(response), "201\r\n"); // Đã từ chối
+        }
+
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ⓰ Command không tồn tại
     // ============================
     snprintf(response, sizeof(response), "ERR UNKNOWN_COMMAND %s\r\n", cmd);
     enqueue_send(idx, response, strlen(response));
