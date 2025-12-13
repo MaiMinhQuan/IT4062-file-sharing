@@ -361,4 +361,19 @@ BEGIN
     ORDER BY g.group_id, gr.created_at ASC;
 END$$
 
+DROP FUNCTION IF EXISTS get_file_name_by_id$$
+CREATE FUNCTION get_file_name_by_id(p_file_id INT)
+RETURNS VARCHAR(255)
+DETERMINISTIC
+BEGIN
+    DECLARE result VARCHAR(255);
+
+    SELECT file_name INTO result
+    FROM files
+    WHERE file_id = p_file_id
+    LIMIT 1;
+
+    RETURN result;  -- Nếu không có thì trả NULL
+END$$
+
 DELIMITER ;

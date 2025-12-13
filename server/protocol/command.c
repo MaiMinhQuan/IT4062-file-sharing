@@ -4,6 +4,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>     // for strcasecmp
+#include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <limits.h>
+#include <openssl/evp.h>
 #include "../auth/auth.h"
 #include "../auth/token.h"
 #include "../database/db.h"
@@ -11,6 +19,18 @@
 
 #define BUFFER_SIZE 4096
 #define MAX_CONCURRENT_UPLOADS 3
+
+// Rate limiting: Track active uploads globally
+static int active_uploads = 0;
+#define STORAGE_ROOT "./storage"
+#define TMP_SUFFIX ".part"
+#define MAX_FILENAME_LEN 255
+#define FILE_CHUNK_SIZE 2048
+#define BASE64_CHUNK_SIZE (((FILE_CHUNK_SIZE + 2) / 3) * 4 + 4)
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 static void trim_crlf(char *str) {
     if (!str) return;
@@ -65,6 +85,305 @@ static int parse_create_group_args(const char *raw_line,
         desc_out[desc_len] = '\0';
     }
 
+    return 1;
+}
+
+static int ensure_directory_exists(const char *path) {
+    if (mkdir(path, 0755) == 0) {
+        return 0;
+    }
+    if (errno == EEXIST) {
+        return 0;
+    }
+    return -1;
+}
+
+static int prepare_storage_directory(int group_id, int dir_id, char *dir_out, size_t dir_size) {
+    if (!dir_out || dir_size == 0) {
+        return -1;
+    }
+
+    if (ensure_directory_exists(STORAGE_ROOT) != 0) {
+        return -1;
+    }
+
+    char group_dir[PATH_MAX];
+    int written = snprintf(group_dir, sizeof(group_dir), "%s/group_%d", STORAGE_ROOT, group_id);
+    if (written <= 0 || written >= (int)sizeof(group_dir)) {
+        return -1;
+    }
+    if (ensure_directory_exists(group_dir) != 0) {
+        return -1;
+    }
+
+    written = snprintf(dir_out, dir_size, "%s/dir_%d", group_dir, dir_id);
+    if (written <= 0 || written >= (int)dir_size) {
+        return -1;
+    }
+
+    if (ensure_directory_exists(dir_out) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void sanitize_filename(const char *input, char *output, size_t size) {
+    if (!output || size == 0) return;
+    output[0] = '\0';
+
+    if (!input) return;
+
+    size_t out_idx = 0;
+    size_t len = strlen(input);
+    for (size_t i = 0; i < len && out_idx + 1 < size; ++i) {
+        unsigned char c = (unsigned char)input[i];
+        if (c == '/' || c == '\\') {
+            c = '_';
+        } else if (c == '.' && i + 1 < len && input[i + 1] == '.') {
+            c = '_';
+        } else if (!isalnum(c) && c != '.' && c != '_' && c != '-' && c != ' ') {
+            c = '_';
+        }
+
+        if (c == ' ') {
+            c = '_';
+        }
+
+        if (isprint(c)) {
+            output[out_idx++] = (char)c;
+        }
+    }
+
+    if (out_idx == 0) {
+        strncpy(output, "upload.bin", size - 1);
+        output[size - 1] = '\0';
+        return;
+    }
+
+    output[out_idx] = '\0';
+}
+
+static int user_in_group(int user_id, int group_id) {
+    char query[256];
+    snprintf(query, sizeof(query),
+             "SELECT 1 FROM user_groups WHERE user_id=%d AND group_id=%d LIMIT 1",
+             user_id, group_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    int exists = mysql_num_rows(res) > 0;
+    mysql_free_result(res);
+    return exists;
+}
+
+static int dir_belongs_to_group(int dir_id, int group_id) {
+    char query[256];
+    snprintf(query, sizeof(query),
+             "SELECT 1 FROM directories WHERE dir_id=%d AND group_id=%d AND is_deleted=0 LIMIT 1",
+             dir_id, group_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    int exists = mysql_num_rows(res) > 0;
+    mysql_free_result(res);
+    return exists;
+}
+
+static int decode_base64_chunk(const char *input, unsigned char **output, size_t *out_len) {
+    if (!input || !output || !out_len) {
+        return -1;
+    }
+
+    size_t in_len = strlen(input);
+    if (in_len == 0) {
+        *output = NULL;
+        *out_len = 0;
+        return 0;
+    }
+
+    size_t max_len = (in_len / 4) * 3 + 3;
+    unsigned char *buffer = (unsigned char *)malloc(max_len);
+    if (!buffer) {
+        return -1;
+    }
+
+    int decoded_len = EVP_DecodeBlock(buffer, (const unsigned char *)input, (int)in_len);
+    if (decoded_len < 0) {
+        free(buffer);
+        return -1;
+    }
+
+    while (in_len > 0 && input[in_len - 1] == '=') {
+        decoded_len--;
+        in_len--;
+    }
+
+    *output = buffer;
+    *out_len = (size_t)decoded_len;
+    return 0;
+}
+
+static int write_chunk_file(const char *path, const unsigned char *data, size_t len, int chunk_index) {
+    if (!path) return -1;
+    const char *mode = (chunk_index <= 1) ? "wb" : "ab";
+    FILE *fp = fopen(path, mode);
+    if (!fp) {
+        return -1;
+    }
+
+    if (len > 0 && data) {
+        size_t written = fwrite(data, 1, len, fp);
+        if (written != len) {
+            fclose(fp);
+            return -1;
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static long get_file_size(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    return (long)st.st_size;
+}
+
+static int insert_file_metadata(const char *file_name,
+                                const char *file_path,
+                                long file_size,
+                                int group_id,
+                                int dir_id,
+                                int user_id) {
+    if (!file_name || !file_path) {
+        return -1;
+    }
+
+    char escaped_name[512];
+    char escaped_path[1024];
+    mysql_real_escape_string(conn, escaped_name, file_name, strlen(file_name));
+    mysql_real_escape_string(conn, escaped_path, file_path, strlen(file_path));
+
+    char query[2048];
+    snprintf(query, sizeof(query),
+             "INSERT INTO files (file_name, file_path, file_size, dir_id, group_id, uploaded_by) "
+             "VALUES ('%s','%s',%ld,%d,%d,%d)",
+             escaped_name, escaped_path, file_size, dir_id, group_id, user_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void send_upload_error(int idx, const char *reason) {
+    if (reason) {
+        printf("[UPLOAD_FILE][idx=%d] %s\n", idx, reason);
+    }
+    const char *err = "500\r\n";
+    enqueue_send(idx, err, strlen(err));
+}
+
+static void send_download_error(int idx, const char *reason) {
+    if (reason) {
+        printf("[DOWNLOAD_FILE][idx=%d] %s\n", idx, reason);
+    }
+    const char *err = "500\r\n";
+    enqueue_send(idx, err, strlen(err));
+}
+
+static int encode_base64_chunk(const unsigned char *input, size_t len,
+                               char *output, size_t out_size) {
+    if (!input && len > 0) return -1;
+    if (!output || out_size == 0) return -1;
+
+    if (len == 0) {
+        if (out_size < 1) return -1;
+        output[0] = '\0';
+        return 0;
+    }
+
+    if (out_size < BASE64_CHUNK_SIZE) {
+        // Ensure buffer large enough for max chunk
+        return -1;
+    }
+
+    int encoded = EVP_EncodeBlock((unsigned char *)output, input, (int)len);
+    if (encoded < 0) {
+        return -1;
+    }
+    if (encoded >= (int)out_size) {
+        return -1;
+    }
+    output[encoded] = '\0';
+    return encoded;
+}
+
+static int fetch_file_metadata(int file_id,
+                               char *name_out, size_t name_size,
+                               char *path_out, size_t path_size,
+                               long *size_out,
+                               int *dir_id_out,
+                               int *group_id_out) {
+    if (!name_out || !path_out || !size_out || !dir_id_out || !group_id_out) {
+        return -1;
+    }
+
+    char query[256];
+    snprintf(query, sizeof(query),
+             "SELECT file_name, file_path, file_size, dir_id, group_id "
+             "FROM files "
+             "WHERE file_id=%d AND is_deleted=0 LIMIT 1",
+             file_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (!row) {
+        mysql_free_result(res);
+        return 0;
+    }
+
+    const char *name = row[0] ? row[0] : "";
+    const char *path = row[1] ? row[1] : "";
+    const char *size_str = row[2] ? row[2] : "0";
+    const char *dir_str = row[3] ? row[3] : "0";
+    const char *group_str = row[4] ? row[4] : "0";
+
+    strncpy(name_out, name, name_size - 1);
+    name_out[name_size - 1] = '\0';
+    strncpy(path_out, path, path_size - 1);
+    path_out[path_size - 1] = '\0';
+
+    *size_out = strtol(size_str, NULL, 10);
+    *dir_id_out = atoi(dir_str);
+    *group_id_out = atoi(group_str);
+
+    mysql_free_result(res);
     return 1;
 }
 
@@ -526,11 +845,9 @@ void process_command(int idx, const char *line, int line_len) {
         // Trả về response theo mã trạng thái
         snprintf(response, sizeof(response), "%d CHECK_ADMIN %s\r\n",
                  result_code2, group_id_str);
-        enqueue_send(idx, response, strlen(response));
+                 enqueue_send(idx, response, strlen(response));
         return;
     }
-
-    // ============================
     // 🔟 HANDLE_JOIN_REQUEST token request_id option
     // ============================
     if (strcasecmp(cmd, "HANDLE_JOIN_REQUEST") == 0) {
@@ -699,7 +1016,6 @@ void process_command(int idx, const char *line, int line_len) {
         enqueue_send(idx, response, strlen(response));
         return;
     }
-
     // ⓫ GET_PENDING_REQUESTS token
     // ============================
     if (strcasecmp(cmd, "GET_PENDING_REQUESTS") == 0) {
