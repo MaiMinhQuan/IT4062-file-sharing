@@ -1,2 +1,28 @@
 *.o
+*.out
+*.exe
+server
+client
 server/auth/authenticated_handlers_example.c
+
+# IDE and OS files
+.DS_Store
+.vscode/
+.idea/
+
+# Build artifacts
+*.a
+*.so
+*.dylib
+
+# Test files
+*.mp3
+*.mp4
+*.png
+*.jpg
+*.jpeg
+*.gif
+insert_test_data*.sql
+
+# Storage folder
+server/storage/*/
