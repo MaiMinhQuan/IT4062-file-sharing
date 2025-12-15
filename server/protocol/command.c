@@ -2147,7 +2147,120 @@ void process_command(int idx, const char *line, int line_len) {
         enqueue_send(idx, response, strlen(response));
         return;
     }
-    
+
+    // ============================
+    // LIST_GROUP_MEMBERS token group_id
+    // ============================
+    if (strcasecmp(cmd, "LIST_GROUP_MEMBERS") == 0) {
+        char *token = next_token(&ptr);
+        char *group_id_str = next_token(&ptr);
+
+        if (!token || !group_id_str) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int group_id = atoi(group_id_str);
+        if (group_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Check if group exists
+        char query[512];
+        snprintf(query, sizeof(query),
+                 "SELECT group_id FROM `groups` WHERE group_id=%d", group_id);
+
+        if (mysql_query(conn, query) != 0) {
+            fprintf(stderr, "MySQL Error (check group): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500 LIST_GROUP_MEMBERS %d\r\n", group_id);
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404 LIST_GROUP_MEMBERS %d\r\n", group_id);
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        mysql_free_result(res);
+
+        // Check if user is member of the group
+        int membership = user_in_group(user_id, group_id);
+        if (membership != 1) {
+            snprintf(response, sizeof(response), "403 LIST_GROUP_MEMBERS %d\r\n", group_id);
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Get all members of the group
+        snprintf(query, sizeof(query),
+                 "SELECT u.user_id, u.username, ug.role "
+                 "FROM user_groups ug "
+                 "JOIN users u ON ug.user_id = u.user_id "
+                 "WHERE ug.group_id=%d "
+                 "ORDER BY ug.role DESC, u.username ASC",
+                 group_id);
+
+        if (mysql_query(conn, query) != 0) {
+            fprintf(stderr, "MySQL Error (get members): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500 LIST_GROUP_MEMBERS %d\r\n", group_id);
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        res = mysql_store_result(conn);
+        if (!res) {
+            fprintf(stderr, "MySQL Error (store result): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500 LIST_GROUP_MEMBERS %d\r\n", group_id);
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Build response: 200 LIST_GROUP_MEMBERS username||role<SPACE>... group_id<CRLF>
+        char members_data[BUFFER_SIZE * 4] = {0};
+        int first = 1;
+
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+            if (!first) {
+                strcat(members_data, " ");
+            }
+            first = 0;
+
+            char member_entry[256];
+            snprintf(member_entry, sizeof(member_entry), "%s||%s",
+                     row[1] ? row[1] : "?",  // username
+                     row[2] ? row[2] : "?"); // role
+            strcat(members_data, member_entry);
+        }
+        mysql_free_result(res);
+
+        // Nếu không có member nào (không nên xảy ra vì user đã check membership)
+        if (first) {
+            strcpy(members_data, "");
+        }
+
+        snprintf(response, sizeof(response), "200 LIST_GROUP_MEMBERS %s %d\r\n",
+                 members_data, group_id);
+        enqueue_send(idx, response, strlen(response));
+        printf("[LIST_GROUP_MEMBERS] Sent response: %s", response);
+        return;
+    }
+
     // ============================
     // 8️⃣ UPLOAD_FILE token group_id dir_id file_name chunk_idx total_chunks payload
     // ============================
@@ -2340,7 +2453,7 @@ void process_command(int idx, const char *line, int line_len) {
                 bytes_to_read = (size_t)remaining;
             }
         }
-        
+
         size_t bytes_read = 0;
         if (file_size > 0) {
             bytes_read = fread(chunk_buffer, 1, bytes_to_read, fp);
