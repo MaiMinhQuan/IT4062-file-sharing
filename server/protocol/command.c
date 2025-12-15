@@ -203,6 +203,150 @@ static int dir_belongs_to_group(int dir_id, int group_id) {
     return exists;
 }
 
+static int is_user_admin_of_group(int user_id, int group_id) {
+    char query[256];
+    snprintf(query, sizeof(query),
+             "SELECT 1 FROM user_groups WHERE user_id=%d AND group_id=%d AND role='admin' LIMIT 1",
+             user_id, group_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    int is_admin = mysql_num_rows(res) > 0;
+    mysql_free_result(res);
+    return is_admin;
+}
+
+static int file_belongs_to_group(int file_id, int group_id) {
+    char query[256];
+    snprintf(query, sizeof(query),
+             "SELECT 1 FROM files WHERE file_id=%d AND group_id=%d AND is_deleted=0 LIMIT 1",
+             file_id, group_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    int exists = mysql_num_rows(res) > 0;
+    mysql_free_result(res);
+    return exists;
+}
+
+// Recursive delete directory and all its contents
+static int delete_directory_recursive(int dir_id) {
+    char query[512];
+
+    // Delete all files in this directory
+    snprintf(query, sizeof(query),
+             "UPDATE files SET is_deleted=1, deleted_at=NOW() WHERE dir_id=%d AND is_deleted=0",
+             dir_id);
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    // Get all subdirectories
+    snprintf(query, sizeof(query),
+             "SELECT dir_id FROM directories WHERE parent_dir_id=%d AND is_deleted=0",
+             dir_id);
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    // Recursively delete subdirectories
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+        int subdir_id = atoi(row[0]);
+        if (delete_directory_recursive(subdir_id) < 0) {
+            mysql_free_result(res);
+            return -1;
+        }
+    }
+    mysql_free_result(res);
+
+    // Finally delete this directory itself
+    snprintf(query, sizeof(query),
+             "UPDATE directories SET is_deleted=1, deleted_at=NOW() WHERE dir_id=%d",
+             dir_id);
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+// Recursive copy directory and all its contents
+static int copy_directory_recursive(int src_dir_id, int target_parent_id, int user_id) {
+    char query[1024];
+
+    // Copy the directory itself first
+    snprintf(query, sizeof(query),
+             "INSERT INTO directories (dir_name, parent_dir_id, group_id, created_by) "
+             "SELECT dir_name, %d, group_id, %d "
+             "FROM directories WHERE dir_id=%d",
+             target_parent_id, user_id, src_dir_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    // Get the new directory ID
+    int new_dir_id = mysql_insert_id(conn);
+
+    // Copy all files in this directory
+    snprintf(query, sizeof(query),
+             "INSERT INTO files (file_name, file_path, file_size, file_type, dir_id, group_id, uploaded_by) "
+             "SELECT file_name, file_path, file_size, file_type, %d, group_id, %d "
+             "FROM files WHERE dir_id=%d AND is_deleted=0",
+             new_dir_id, user_id, src_dir_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    // Get all subdirectories
+    snprintf(query, sizeof(query),
+             "SELECT dir_id FROM directories WHERE parent_dir_id=%d AND is_deleted=0",
+             src_dir_id);
+
+    if (mysql_query(conn, query) != 0) {
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) {
+        return -1;
+    }
+
+    // Recursively copy subdirectories
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+        int subdir_id = atoi(row[0]);
+        if (copy_directory_recursive(subdir_id, new_dir_id, user_id) < 0) {
+            mysql_free_result(res);
+            return -1;
+        }
+    }
+    mysql_free_result(res);
+
+    return 0;
+}
+
 static int decode_base64_chunk(const char *input, unsigned char **output, size_t *out_len) {
     if (!input || !output || !out_len) {
         return -1;
@@ -1507,7 +1651,728 @@ void process_command(int idx, const char *line, int line_len) {
         return;
     }
 
-    // ⓰ Command không tồn tại
+    // ============================
+    // ⓰ DELETE_ITEM token item_id type
+    // ============================
+    if (strcasecmp(cmd, "DELETE_ITEM") == 0) {
+        char *token = next_token(&ptr);
+        char *item_id_str = next_token(&ptr);
+        char *type = next_token(&ptr);
+
+        if (!token || !item_id_str || !type) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int item_id = atoi(item_id_str);
+        if (item_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Validate type
+        if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Get group_id of the item
+        int group_id = -1;
+        char query[512];
+
+        if (strcasecmp(type, "F") == 0) {
+            // File
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM files WHERE file_id=%d AND is_deleted=0",
+                     item_id);
+        } else {
+            // Directory
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                     item_id);
+        }
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        group_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Check if user is admin
+        int is_admin = is_user_admin_of_group(user_id, group_id);
+        if (is_admin < 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (is_admin == 0) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Soft delete the item
+        if (strcasecmp(type, "F") == 0) {
+            // Delete single file
+            snprintf(query, sizeof(query),
+                     "UPDATE files SET is_deleted=1, deleted_at=NOW() WHERE file_id=%d",
+                     item_id);
+            if (mysql_query(conn, query) != 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+        } else {
+            // Delete directory recursively (all files and subdirectories)
+            if (delete_directory_recursive(item_id) < 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+        }
+
+        snprintf(response, sizeof(response), "200\r\n");
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓱ RENAME_ITEM token item_id new_name type
+    // ============================
+    if (strcasecmp(cmd, "RENAME_ITEM") == 0) {
+        char *token = next_token(&ptr);
+        char *item_id_str = next_token(&ptr);
+        char *new_name = next_token(&ptr);
+        char *type = next_token(&ptr);
+
+        if (!token || !item_id_str || !new_name || !type) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int item_id = atoi(item_id_str);
+        if (item_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Validate type
+        if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Get group_id of the item
+        int group_id = -1;
+        char query[512];
+
+        if (strcasecmp(type, "F") == 0) {
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM files WHERE file_id=%d AND is_deleted=0",
+                     item_id);
+        } else {
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                     item_id);
+        }
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        group_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Check if user is admin
+        int is_admin = is_user_admin_of_group(user_id, group_id);
+        if (is_admin < 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (is_admin == 0) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Escape new_name
+        char escaped_name[512];
+        mysql_real_escape_string(conn, escaped_name, new_name, strlen(new_name));
+
+        // Update the name
+        if (strcasecmp(type, "F") == 0) {
+            snprintf(query, sizeof(query),
+                     "UPDATE files SET file_name='%s', updated_at=NOW() WHERE file_id=%d",
+                     escaped_name, item_id);
+        } else {
+            snprintf(query, sizeof(query),
+                     "UPDATE directories SET dir_name='%s', updated_at=NOW() WHERE dir_id=%d",
+                     escaped_name, item_id);
+        }
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        snprintf(response, sizeof(response), "200\r\n");
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓲ MOVE_ITEM token item_id target_dir_id type
+    // ============================
+    if (strcasecmp(cmd, "MOVE_ITEM") == 0) {
+        char *token = next_token(&ptr);
+        char *item_id_str = next_token(&ptr);
+        char *target_dir_id_str = next_token(&ptr);
+        char *type = next_token(&ptr);
+
+        if (!token || !item_id_str || !target_dir_id_str || !type) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int item_id = atoi(item_id_str);
+        int target_dir_id = atoi(target_dir_id_str);
+
+        if (item_id <= 0 || target_dir_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Validate type
+        if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Get group_id of the item
+        int item_group_id = -1;
+        char query[512];
+
+        if (strcasecmp(type, "F") == 0) {
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM files WHERE file_id=%d AND is_deleted=0",
+                     item_id);
+        } else {
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                     item_id);
+        }
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        item_group_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Get group_id of target directory
+        snprintf(query, sizeof(query),
+                 "SELECT group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                 target_dir_id);
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        row = mysql_fetch_row(res);
+        int target_group_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Check if both belong to same group
+        if (item_group_id != target_group_id) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Check if user is admin
+        int is_admin = is_user_admin_of_group(user_id, item_group_id);
+        if (is_admin < 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (is_admin == 0) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Move the item
+        if (strcasecmp(type, "F") == 0) {
+            snprintf(query, sizeof(query),
+                     "UPDATE files SET dir_id=%d, updated_at=NOW() WHERE file_id=%d",
+                     target_dir_id, item_id);
+        } else {
+            snprintf(query, sizeof(query),
+                     "UPDATE directories SET parent_dir_id=%d, updated_at=NOW() WHERE dir_id=%d",
+                     target_dir_id, item_id);
+        }
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        snprintf(response, sizeof(response), "200\r\n");
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓳ COPY_ITEM token item_id target_dir_id type
+    // ============================
+    if (strcasecmp(cmd, "COPY_ITEM") == 0) {
+        char *token = next_token(&ptr);
+        char *item_id_str = next_token(&ptr);
+        char *target_dir_id_str = next_token(&ptr);
+        char *type = next_token(&ptr);
+
+        if (!token || !item_id_str || !target_dir_id_str || !type) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int item_id = atoi(item_id_str);
+        int target_dir_id = atoi(target_dir_id_str);
+
+        if (item_id <= 0 || target_dir_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Validate type
+        if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Get group_id of the item
+        int item_group_id = -1;
+        char query[1024];
+
+        if (strcasecmp(type, "F") == 0) {
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM files WHERE file_id=%d AND is_deleted=0",
+                     item_id);
+        } else {
+            snprintf(query, sizeof(query),
+                     "SELECT group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                     item_id);
+        }
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        item_group_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Get group_id of target directory
+        snprintf(query, sizeof(query),
+                 "SELECT group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                 target_dir_id);
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        res = mysql_store_result(conn);
+        if (!res || mysql_num_rows(res) == 0) {
+            if (res) mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        row = mysql_fetch_row(res);
+        int target_group_id = atoi(row[0]);
+        mysql_free_result(res);
+
+        // Check if both belong to same group
+        if (item_group_id != target_group_id) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Check if user is admin
+        int is_admin = is_user_admin_of_group(user_id, item_group_id);
+        if (is_admin < 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        if (is_admin == 0) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Copy the item
+        if (strcasecmp(type, "F") == 0) {
+            // Copy single file - duplicate record in database
+            snprintf(query, sizeof(query),
+                     "INSERT INTO files (file_name, file_path, file_size, file_type, dir_id, group_id, uploaded_by) "
+                     "SELECT file_name, file_path, file_size, file_type, %d, group_id, %d "
+                     "FROM files WHERE file_id=%d",
+                     target_dir_id, user_id, item_id);
+            if (mysql_query(conn, query) != 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+        } else {
+            // Copy directory recursively (all files and subdirectories)
+            if (copy_directory_recursive(item_id, target_dir_id, user_id) < 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+        }
+
+        snprintf(response, sizeof(response), "200\r\n");
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+    
+    // ============================
+    // 8️⃣ UPLOAD_FILE token group_id dir_id file_name chunk_idx total_chunks payload
+    // ============================
+    if (strcasecmp(cmd, "UPLOAD_FILE") == 0) {
+        char *token = strtok(NULL, " \r\n");
+        char *group_id_str = strtok(NULL, " \r\n");
+        char *dir_id_str = strtok(NULL, " \r\n");
+        char *file_name_raw = strtok(NULL, " \r\n");
+        char *chunk_idx_str = strtok(NULL, " \r\n");
+        char *total_chunks_str = strtok(NULL, " \r\n");
+        char *base64_payload = strtok(NULL, "\r\n");
+
+        if (!token || !group_id_str || !dir_id_str || !file_name_raw ||
+            !chunk_idx_str || !total_chunks_str || !base64_payload) {
+            send_upload_error(idx, "Thiếu tham số upload");
+            return;
+        }
+
+        int group_id = atoi(group_id_str);
+        int dir_id = atoi(dir_id_str);
+        int chunk_index = atoi(chunk_idx_str);
+        int total_chunks = atoi(total_chunks_str);
+
+        if (group_id <= 0 || dir_id <= 0 || chunk_index <= 0 ||
+            total_chunks <= 0 || chunk_index > total_chunks) {
+            send_upload_error(idx, "Tham số số học không hợp lệ");
+            return;
+        }
+
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            send_upload_error(idx, "Token không hợp lệ");
+            return;
+        }
+
+        int membership = user_in_group(user_id, group_id);
+        if (membership != 1) {
+            send_upload_error(idx, "User không thuộc group");
+            return;
+        }
+
+        int dir_valid = dir_belongs_to_group(dir_id, group_id);
+        if (dir_valid != 1) {
+            send_upload_error(idx, "Thư mục không tồn tại trong group");
+            return;
+        }
+
+        char safe_filename[MAX_FILENAME_LEN];
+        sanitize_filename(file_name_raw, safe_filename, sizeof(safe_filename));
+
+        char dir_path[PATH_MAX];
+        if (prepare_storage_directory(group_id, dir_id, dir_path, sizeof(dir_path)) != 0) {
+            send_upload_error(idx, "Không tạo được thư mục lưu trữ");
+            return;
+        }
+
+        char final_path[PATH_MAX];
+        char temp_path[PATH_MAX];
+        int written = snprintf(final_path, sizeof(final_path), "%s/%s", dir_path, safe_filename);
+        if (written <= 0 || written >= (int)sizeof(final_path)) {
+            send_upload_error(idx, "Đường dẫn file quá dài");
+            return;
+        }
+        written = snprintf(temp_path, sizeof(temp_path), "%s%s", final_path, TMP_SUFFIX);
+        if (written <= 0 || written >= (int)sizeof(temp_path)) {
+            send_upload_error(idx, "Đường dẫn file tạm quá dài");
+            return;
+        }
+
+        unsigned char *decoded = NULL;
+        size_t decoded_len = 0;
+        if (decode_base64_chunk(base64_payload, &decoded, &decoded_len) != 0) {
+            send_upload_error(idx, "Giải mã base64 thất bại");
+            return;
+        }
+
+        if (write_chunk_file(temp_path, decoded, decoded_len, chunk_index) != 0) {
+            free(decoded);
+            send_upload_error(idx, "Ghi chunk xuống file tạm thất bại");
+            return;
+        }
+        free(decoded);
+
+        if (chunk_index == total_chunks) {
+            if (rename(temp_path, final_path) != 0) {
+                send_upload_error(idx, "Đổi tên file tạm thất bại");
+                return;
+            }
+
+            long file_size = get_file_size(final_path);
+            if (file_size < 0) {
+                send_upload_error(idx, "Không đọc được kích thước file sau upload");
+                return;
+            }
+
+            if (insert_file_metadata(safe_filename, final_path, file_size,
+                                     group_id, dir_id, user_id) != 0) {
+                send_upload_error(idx, "Ghi metadata file vào DB thất bại");
+                return;
+            }
+
+            snprintf(response, sizeof(response), "200 %d/%d\r\n", chunk_index, total_chunks);
+        } else {
+            snprintf(response, sizeof(response), "202 %d/%d\r\n", chunk_index, total_chunks);
+        }
+
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // 9️⃣ DOWNLOAD_FILE token file_id chunk_idx
+    // ============================
+    if (strcasecmp(cmd, "DOWNLOAD_FILE") == 0) {
+        char *token = strtok(NULL, " \r\n");
+        char *file_id_str = strtok(NULL, " \r\n");
+        char *chunk_idx_str = strtok(NULL, " \r\n");
+
+        if (!token || !file_id_str || !chunk_idx_str) {
+            send_download_error(idx, "Thiếu tham số download");
+            return;
+        }
+
+        int file_id = atoi(file_id_str);
+        int chunk_index = atoi(chunk_idx_str);
+
+        if (file_id <= 0 || chunk_index <= 0) {
+            send_download_error(idx, "Tham số số học không hợp lệ");
+            return;
+        }
+
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            send_download_error(idx, "Token không hợp lệ");
+            return;
+        }
+
+        char file_name[MAX_FILENAME_LEN];
+        char file_path[PATH_MAX];
+        long file_size = 0;
+        int dir_id = 0;
+        int group_id = 0;
+
+        int fetch_res = fetch_file_metadata(file_id, file_name, sizeof(file_name),
+                                            file_path, sizeof(file_path),
+                                            &file_size, &dir_id, &group_id);
+        if (fetch_res <= 0) {
+            send_download_error(idx, "File không tồn tại");
+            return;
+        }
+
+        int membership = user_in_group(user_id, group_id);
+        if (membership != 1) {
+            send_download_error(idx, "User không thuộc group");
+            return;
+        }
+
+        long total_chunks = (file_size > 0)
+                                ? (file_size + FILE_CHUNK_SIZE - 1) / FILE_CHUNK_SIZE
+                                : 1;
+
+        if (chunk_index > total_chunks) {
+            send_download_error(idx, "Chỉ số chunk vượt quá tổng số chunk");
+            return;
+        }
+
+        FILE *fp = fopen(file_path, "rb");
+        if (!fp) {
+            send_download_error(idx, "Mở file để đọc thất bại");
+            return;
+        }
+
+        if (file_size > 0) {
+            if (fseek(fp, (chunk_index - 1) * FILE_CHUNK_SIZE, SEEK_SET) != 0) {
+                fclose(fp);
+                send_download_error(idx, "Dịch chuyển con trỏ file thất bại");
+                return;
+            }
+        }
+
+        // Đọc chunk từ file
+        unsigned char chunk_buffer[FILE_CHUNK_SIZE];
+        size_t bytes_to_read = FILE_CHUNK_SIZE;
+        if (chunk_index == total_chunks && file_size > 0) {
+            // Chunk cuối cùng - đọc phần còn lại
+            long remaining = file_size - (chunk_index - 1) * FILE_CHUNK_SIZE;
+            if (remaining > 0 && remaining < FILE_CHUNK_SIZE) {
+                bytes_to_read = (size_t)remaining;
+            }
+        }
+        
+        size_t bytes_read = 0;
+        if (file_size > 0) {
+            bytes_read = fread(chunk_buffer, 1, bytes_to_read, fp);
+            if (bytes_read == 0 && ferror(fp)) {
+                fclose(fp);
+                send_download_error(idx, "Đọc chunk từ file thất bại");
+                return;
+            }
+        }
+        fclose(fp);
+
+        // Encode chunk thành base64
+        char base64_output[BASE64_CHUNK_SIZE];
+        int encoded_len = encode_base64_chunk(chunk_buffer, bytes_read, base64_output, sizeof(base64_output));
+        if (encoded_len < 0) {
+            send_download_error(idx, "Mã hoá chunk thất bại");
+            return;
+        }
+
+        // Gửi response: "200 chunk_idx/total_chunks file_name base64_data\r\n" hoặc "202 chunk_idx/total_chunks file_name base64_data\r\n"
+        if (chunk_index == total_chunks) {
+            snprintf(response, sizeof(response), "200 %d/%ld %s %s\r\n", chunk_index, total_chunks, file_name, base64_output);
+        } else {
+            snprintf(response, sizeof(response), "202 %d/%ld %s %s\r\n", chunk_index, total_chunks, file_name, base64_output);
+        }
+
+        enqueue_send(idx, response, strlen(response));
+        return;
+    }
+
+    // ============================
+    // ⓴ Command không tồn tại
     // ============================
     snprintf(response, sizeof(response), "ERR UNKNOWN_COMMAND %s\r\n", cmd);
     enqueue_send(idx, response, strlen(response));
