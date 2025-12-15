@@ -36,9 +36,12 @@ int global_sock = -1;
 int connect_to_server();
 void handle_create_group();
 void handle_list_groups();
+void handle_group_access(int group_id, const char *user_role);
+void handle_invite_user(int group_id);
 void handle_request_join_group();
 void handle_view_pending_requests();
 void handle_approve_request();
+void handle_view_my_invitations();
 void handle_upload_file();
 void handle_download_file();
 
@@ -155,11 +158,10 @@ void print_menu() {
         printf("1. Create Group (Tạo nhóm)\n");
         printf("2. View My Groups (Xem nhóm của tôi)\n");
         printf("3. Request Join Group (Xin vào nhóm)\n");
-        printf("4. [Admin] View & Approve Requests (Xem & phê duyệt yêu cầu)\n");
-        printf("5. Upload File (Tải lên)\n");
-        printf("6. Download File (Tải xuống)\n");
-        printf("7. Logout (Đăng xuất)\n");
-        printf("8. Exit (Thoát)\n");
+        printf("4. [Admin] Approve Join Requests (Phê duyệt yêu cầu tham gia)\n");
+        printf("5. View My Invitations (Xem lời mời của tôi)\n");
+        printf("6. Logout (Đăng xuất)\n");
+        printf("7. Exit (Thoát)\n");
     } else {
         printf("Trạng thái: ✗ Chưa đăng nhập\n");
         printf("=========================================\n");
@@ -674,6 +676,277 @@ void handle_list_groups() {
     }
 
     printf("%s", table_bottom);
+
+    // Lưu mapping group_id -> role để biết quyền
+    int group_ids[100];
+    char roles[100][20];
+    int group_index = 0;
+
+    // Parse lại để lưu role
+    list_start = strstr(response, "\r\n");
+    if (list_start) list_start += 2;
+
+    while (list_start && *list_start && group_index < 100) {
+        char *next_line = strstr(list_start, "\r\n");
+        if (next_line) *next_line = '\0';
+
+        if (strlen(list_start) > 0) {
+            char line_copy[BUFFER_SIZE];
+            strncpy(line_copy, list_start, sizeof(line_copy) - 1);
+            line_copy[sizeof(line_copy) - 1] = '\0';
+
+            char *gid = strtok(line_copy, "|");
+            strtok(NULL, "|"); // group_name
+            char *role = strtok(NULL, "|");
+
+            if (gid && role) {
+                group_ids[group_index] = atoi(gid);
+                strncpy(roles[group_index], role, sizeof(roles[0]) - 1);
+                roles[group_index][sizeof(roles[0]) - 1] = '\0';
+                group_index++;
+            }
+        }
+
+        if (!next_line) break;
+        list_start = next_line + 2;
+    }
+
+    // Prompt user để chọn nhóm
+    printf("\n💡 Nhập ID nhóm để truy cập (hoặc 0 để quay lại): ");
+    int selected_group_id;
+    if (scanf("%d", &selected_group_id) != 1) {
+        while (getchar() != '\n');
+        printf("❌ ID không hợp lệ!\n");
+        return;
+    }
+    while (getchar() != '\n');
+
+    if (selected_group_id == 0) {
+        return;
+    }
+
+    // Tìm role của user trong group này
+    char user_role[20] = "member";
+    for (int i = 0; i < group_index; i++) {
+        if (group_ids[i] == selected_group_id) {
+            strncpy(user_role, roles[i], sizeof(user_role) - 1);
+            user_role[sizeof(user_role) - 1] = '\0';
+            break;
+        }
+    }
+
+    // Gọi hàm truy cập nhóm với role
+    handle_group_access(selected_group_id, user_role);
+}
+
+void handle_group_access(int group_id, const char *user_role) {
+    int is_admin = (strcmp(user_role, "admin") == 0);
+
+    printf("\n╔════════════════════════════════════════════╗\n");
+    printf("║   📁 NHÓM #%d - Vai trò: %s%-8s%s ║\n",
+           group_id,
+           is_admin ? "👑 " : "👤 ",
+           user_role,
+           is_admin ? " " : "");
+    printf("╚════════════════════════════════════════════╝\n");
+
+    while (1) {
+        printf("\n┌─────────────────────────────────────────┐\n");
+        printf("│         QUẢN LÝ NHÓM - MENU             │\n");
+        printf("├─────────────────────────────────────────┤\n");
+        printf("│ 1. 📂 Xem danh sách file/thư mục        │\n");
+        printf("│ 2. ⬆️  Upload file                       │\n");
+        printf("│ 3. ⬇️  Download file                     │\n");
+        printf("│ 4. 📁 Tạo thư mục mới                   │\n");
+        printf("│ 5. 👥 Xem thành viên nhóm               │\n");
+        printf("│ 6. 📊 Xem lịch sử hoạt động             │\n");
+
+        if (is_admin) {
+            printf("│ 7. ✉️  Mời user vào nhóm (Admin)        │\n");
+        }
+
+        printf("│ 0. ⬅️  Quay lại                          │\n");
+        printf("└─────────────────────────────────────────┘\n");
+        printf("Chọn chức năng: ");
+
+        int choice;
+        if (scanf("%d", &choice) != 1) {
+            while (getchar() != '\n');
+            printf("❌ Lựa chọn không hợp lệ!\n");
+            continue;
+        }
+        while (getchar() != '\n');
+
+        switch (choice) {
+            case 1:
+                printf("\n🔧 Tính năng đang phát triển: Xem danh sách file/thư mục\n");
+                // TODO: implement handle_list_files(group_id);
+                break;
+            case 2:
+                printf("\n🔧 Tính năng đang phát triển: Upload file\n");
+                // TODO: implement handle_upload_file(group_id);
+                break;
+            case 3:
+                printf("\n🔧 Tính năng đang phát triển: Download file\n");
+                // TODO: implement handle_download_file(group_id);
+                break;
+            case 4:
+                printf("\n🔧 Tính năng đang phát triển: Tạo thư mục\n");
+                // TODO: implement handle_create_directory(group_id);
+                break;
+            case 5:
+                printf("\n🔧 Tính năng đang phát triển: Xem thành viên\n");
+                // TODO: implement handle_list_members(group_id);
+                break;
+            case 6:
+                printf("\n🔧 Tính năng đang phát triển: Lịch sử hoạt động\n");
+                // TODO: implement handle_activity_log(group_id);
+                break;
+            case 7:
+                if (is_admin) {
+                    handle_invite_user(group_id);
+                } else {
+                    printf("❌ Lựa chọn không hợp lệ!\n");
+                }
+                break;
+            case 0:
+                printf("⬅️  Quay lại menu chính...\n");
+                return;
+            default:
+                if (is_admin) {
+                    printf("❌ Lựa chọn không hợp lệ! Vui lòng chọn từ 0-7.\n");
+                } else {
+                    printf("❌ Lựa chọn không hợp lệ! Vui lòng chọn từ 0-6.\n");
+                }
+        }
+    }
+}
+
+void handle_invite_user(int group_id) {
+    printf("\n╔════════════════════════════════════════════╗\n");
+    printf("║        ✉️  MỜI USER VÀO NHÓM               ║\n");
+    printf("╚════════════════════════════════════════════╝\n");
+
+    printf("\n💡 Nhập username của người bạn muốn mời (hoặc '0' để quay lại): ");
+    char username[256];
+    if (scanf("%255s", username) != 1) {
+        while (getchar() != '\n');
+        printf("❌ Username không hợp lệ!\n");
+        return;
+    }
+    while (getchar() != '\n');
+
+    // Kiểm tra nếu nhập 0 để quay lại
+    if (strcmp(username, "0") == 0) {
+        printf("🔙 Quay lại menu nhóm...\n");
+        return;
+    }
+
+    int sock = connect_to_server();
+    if (sock < 0) {
+        printf("❌ Không thể kết nối đến server!\n");
+        return;
+    }
+
+    // Bước 1: Lấy user_id từ username
+    char command[BUFFER_SIZE];
+    snprintf(command, sizeof(command), "GET_USER_ID_BY_USERNAME %s\r\n", username);
+    send(sock, command, strlen(command), 0);
+
+    // Nhận response
+    char response[BUFFER_SIZE] = {0};
+    int bytes = recv(sock, response, sizeof(response) - 1, 0);
+    if (bytes <= 0) {
+        printf("❌ Không nhận được phản hồi từ server.\n");
+        close(sock);
+        return;
+    }
+    response[bytes] = '\0';
+
+    char *crlf = strstr(response, "\r\n");
+    if (crlf) *crlf = '\0';
+
+    int status_code;
+    int invited_user_id = -1;
+    if (sscanf(response, "%d %d", &status_code, &invited_user_id) < 1) {
+        printf("❌ Phản hồi không hợp lệ: %s\n", response);
+        close(sock);
+        return;
+    }
+
+    if (status_code != 200) {
+        if (status_code == 404) {
+            printf("❌ Username '%s' không tồn tại!\n", username);
+        } else if (status_code == 500) {
+            printf("❌ Lỗi server khi tìm kiếm user!\n");
+        } else {
+            printf("❌ Lỗi không xác định (code: %d)\n", status_code);
+        }
+        close(sock);
+        return;
+    }
+
+    if (invited_user_id <= 0) {
+        printf("❌ Không lấy được User ID!\n");
+        close(sock);
+        return;
+    }
+
+    // Bước 2: Gửi lệnh INVITE_USER_TO_GROUP với user_id
+    snprintf(command, sizeof(command), "INVITE_USER_TO_GROUP %s %d %d\r\n",
+             current_token, group_id, invited_user_id);
+    send(sock, command, strlen(command), 0);
+
+    // Nhận response
+    memset(response, 0, sizeof(response));
+    bytes = recv(sock, response, sizeof(response) - 1, 0);
+    if (bytes <= 0) {
+        printf("❌ Không nhận được phản hồi từ server.\n");
+        close(sock);
+        return;
+    }
+    response[bytes] = '\0';
+
+    crlf = strstr(response, "\r\n");
+    if (crlf) *crlf = '\0';
+
+    if (sscanf(response, "%d", &status_code) != 1) {
+        printf("❌ Phản hồi không hợp lệ: %s\n", response);
+        close(sock);
+        return;
+    }
+
+    switch (status_code) {
+        case 200:
+            printf("✅ Gửi lời mời thành công!\n");
+            printf("ℹ️  User '%s' (ID: %d) sẽ nhận được lời mời tham gia nhóm.\n", username, invited_user_id);
+            break;
+        case 400:
+            printf("❌ Yêu cầu không hợp lệ!\n");
+            break;
+        case 401:
+            printf("❌ Token không hợp lệ hoặc đã hết hạn!\n");
+            break;
+        case 403:
+            printf("❌ Bạn không có quyền mời user (chỉ admin mới được mời)!\n");
+            break;
+        case 404:
+            printf("❌ User '%s' (ID: %d) không tồn tại hoặc nhóm không tồn tại!\n", username, invited_user_id);
+            break;
+        case 409:
+            printf("⚠️  User '%s' (ID: %d) đã là thành viên của nhóm!\n", username, invited_user_id);
+            break;
+        case 423:
+            printf("⚠️  Đã gửi lời mời cho user '%s' (ID: %d) trước đó!\n", username, invited_user_id);
+            break;
+        case 500:
+            printf("❌ Lỗi server!\n");
+            break;
+        default:
+            printf("❌ Lỗi không xác định (code: %d)\n", status_code);
+    }
+
+    close(sock);
 }
 
 void handle_request_join_group() {
@@ -1209,6 +1482,217 @@ void handle_approve_request() {
     }
 }
 
+void handle_view_my_invitations() {
+    if (!is_token_valid()) {
+        printf("Bạn cần đăng nhập để xem lời mời!\n");
+        return;
+    }
+
+    while (1) {  // Loop để có thể xử lý nhiều invitation
+        printf("\n╔════════════════════════════════════════════╗\n");
+        printf("║     📬 LỜI MỜI THAM GIA NHÓM CỦA TÔI      ║\n");
+        printf("╚════════════════════════════════════════════╝\n");
+
+        int sock = connect_to_server();
+        if (sock < 0) {
+            printf("❌ Không thể kết nối đến server!\n");
+            return;
+        }
+
+        // Gửi lệnh GET_MY_INVITATIONS
+        char command[BUFFER_SIZE];
+        snprintf(command, sizeof(command), "GET_MY_INVITATIONS %s\r\n", current_token);
+        send(sock, command, strlen(command), 0);
+
+        // Nhận response
+        char response[BUFFER_SIZE] = {0};
+        int bytes = recv(sock, response, sizeof(response) - 1, 0);
+        if (bytes <= 0) {
+            printf("❌ Không nhận được phản hồi từ server.\n");
+            return;
+        }
+        response[bytes] = '\0';
+
+        // Remove trailing CRLF
+        char *crlf = strstr(response, "\r\n");
+        if (crlf) *crlf = '\0';
+
+        // Parse response: "200 LIST_RECEIVED_INVITATIONS [invitation_1] [invitation_2] ..."
+        int status_code = 0;
+        char cmd_name[50];
+        char invitations_data[BUFFER_SIZE] = {0};
+
+        // Parse ít nhất status_code và cmd_name
+        int parsed = sscanf(response, "%d %s %[^\n]", &status_code, cmd_name, invitations_data);
+        if (parsed < 2) {
+            printf("❌ Phản hồi không hợp lệ từ server.\n");
+            printf("Debug: response = '%s'\n", response);
+            return;
+        }
+
+        if (status_code != 200) {
+            if (status_code == 401) {
+                printf("❌ Token không hợp lệ hoặc hết hạn!\n");
+                memset(current_token, 0, sizeof(current_token));
+            } else {
+                printf("❌ Lỗi khi tải danh sách lời mời (Mã: %d).\n", status_code);
+            }
+            return;
+        }
+
+        // Check if there are invitations
+        if (strlen(invitations_data) == 0 || strstr(invitations_data, "[invitation_") == NULL) {
+            printf("\n📭 Bạn không có lời mời nào đang chờ xử lý.\n");
+            return;
+        }
+
+        printf("\n📋 DANH SÁCH LỜI MỜI:\n\n");
+        printf("┌────────────┬──────────┬───────────────────────────────┬──────────────┐\n");
+        printf("│ Request ID │ Group ID │ Tên nhóm                      │ Trạng thái   │\n");
+        printf("├────────────┼──────────┼───────────────────────────────┼──────────────┤\n");
+
+        // Parse invitations: [invitation_n]: group_id group_name request_id request_status
+        char *ptr = invitations_data;
+        int invitation_count = 0;
+
+        while (*ptr) {
+            // Find next invitation marker
+            char *inv_start = strstr(ptr, "[invitation_");
+            if (!inv_start) break;
+
+            // Find the colon after invitation marker
+            char *colon = strchr(inv_start, ':');
+            if (!colon) break;
+
+            // Parse: group_id group_name request_id request_status
+            int group_id, request_id;
+            char group_name[256], status[32];
+
+            if (sscanf(colon + 1, "%d %255s %d %31s", &group_id, group_name, &request_id, status) == 4) {
+                printf("│ %-10d │ %-8d │ %-29.29s │ %-12s │\n",
+                       request_id, group_id, group_name, status);
+                invitation_count++;
+            }
+
+            // Move to next invitation
+            ptr = colon + 1;
+            while (*ptr && *ptr != '[') ptr++;
+        }
+
+        printf("└────────────┴──────────┴───────────────────────────────┴──────────────┘\n");
+
+        if (invitation_count == 0) {
+            printf("\n📭 Bạn không có lời mời nào đang chờ xử lý.\n");
+            return;
+        }
+
+        // Hỏi user có muốn xử lý không
+        printf("\n┌─────────────────────────────────────────────────┐\n");
+        printf("│ Nhập Request ID để chấp nhận/từ chối           │\n");
+        printf("│ Hoặc nhập 0 để quay lại menu chính             │\n");
+        printf("└─────────────────────────────────────────────────┘\n");
+        printf("Request ID: ");
+
+        int request_id;
+        if (scanf("%d", &request_id) != 1) {
+            printf("❌ Request ID không hợp lệ!\n");
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n');
+
+        // Quay lại menu chính
+        if (request_id == 0) {
+            printf("⬅️  Quay lại menu chính...\n");
+            return;
+        }
+
+        if (request_id < 0) {
+            printf("❌ Request ID phải lớn hơn 0!\n");
+            continue;
+        }
+
+        // Hỏi action
+        printf("\n┌─────────────────────────────────────────┐\n");
+        printf("│ 1. Chấp nhận (Tham gia nhóm)           │\n");
+        printf("│ 2. Từ chối                             │\n");
+        printf("└─────────────────────────────────────────┘\n");
+        printf("Lựa chọn (1/2): ");
+
+        int action_choice;
+        if (scanf("%d", &action_choice) != 1) {
+            printf("❌ Lựa chọn không hợp lệ!\n");
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n');
+
+        const char *action = NULL;
+        if (action_choice == 1) {
+            action = "accept";
+        } else if (action_choice == 2) {
+            action = "reject";
+        } else {
+            printf("❌ Lựa chọn không hợp lệ!\n");
+            continue;
+        }
+
+        // Gửi lệnh RESPOND_TO_INVITATION
+        snprintf(command, sizeof(command), "RESPOND_TO_INVITATION %s %d %s\r\n",
+                 current_token, request_id, action);
+        send(sock, command, strlen(command), 0);
+
+        // Nhận response
+        memset(response, 0, sizeof(response));
+        bytes = recv(sock, response, sizeof(response) - 1, 0);
+        if (bytes <= 0) {
+            printf("❌ Không nhận được phản hồi từ server.\n");
+            return;
+        }
+        response[bytes] = '\0';
+
+        char *crlf2 = strstr(response, "\r\n");
+        if (crlf2) *crlf2 = '\0';
+
+        if (sscanf(response, "%d", &status_code) != 1) {
+            printf("❌ Phản hồi không hợp lệ: %s\n", response);
+            return;
+        }
+
+        switch (status_code) {
+            case 200:
+                printf("✅ Đã chấp nhận lời mời! Bạn đã tham gia nhóm.\n");
+                break;
+            case 201:
+                printf("✅ Đã từ chối lời mời.\n");
+                break;
+            case 400:
+                printf("❌ Yêu cầu không hợp lệ!\n");
+                break;
+            case 401:
+                printf("❌ Token không hợp lệ hoặc hết hạn!\n");
+                memset(current_token, 0, sizeof(current_token));
+                return;
+            case 403:
+                printf("❌ Request này không phải là lời mời!\n");
+                break;
+            case 404:
+                printf("❌ Request ID không tồn tại!\n");
+                break;
+            case 409:
+                printf("⚠️  Lời mời này đã được xử lý trước đó!\n");
+                break;
+            case 500:
+                printf("❌ Lỗi server!\n");
+                break;
+            default:
+                printf("❌ Lỗi không xác định (Mã: %d)\n", status_code);
+        }
+
+        printf("\n");
+    }
+}
+
 void handle_upload_file() {
     if (!is_token_valid()) {
         printf("Bạn cần đăng nhập để upload file!\n");
@@ -1599,15 +2083,12 @@ int main() {
                     handle_view_pending_requests();
                     break;
                 case 5:
-                    handle_upload_file();
+                    handle_view_my_invitations();
                     break;
                 case 6:
-                    handle_download_file();
-                    break;
-                case 7:
                     handle_logout();
                     break;
-                case 8:
+                case 7:
                     printf("Tạm biệt!\n");
                     if (global_sock > 0) {
                         close(global_sock);
