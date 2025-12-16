@@ -800,11 +800,12 @@ void process_command(int idx, const char *line, int line_len) {
             MYSQL_ROW row;
             while ((row = mysql_fetch_row(res))) {
                 group_count++;
+                // Stored procedure trả về: group_id, group_name, role, created_at, description
                 const char *group_id = row[0] ? row[0] : "";
                 const char *group_name = row[1] ? row[1] : "";
-                const char *description = row[2] ? row[2] : "";
-                const char *role = row[3] ? row[3] : "";
-                const char *created_at = row[4] ? row[4] : "";
+                const char *role = row[2] ? row[2] : "";
+                const char *created_at = row[3] ? row[3] : "";
+                const char *description = row[4] ? row[4] : "";
 
                 int written = snprintf(groups_buffer + groups_len,
                                        sizeof(groups_buffer) - groups_len,

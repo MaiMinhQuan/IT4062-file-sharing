@@ -658,28 +658,43 @@ void handle_list_groups() {
         "ID", "Tên nhóm", "Vai trò", "Ngày tạo", "Mô tả");
     printf("%s", table_separator);
 
+    // Lưu mapping group_id -> role
+    int group_ids[100];
+    char roles[100][20];
+    int group_index = 0;
+
     char *list_start = strstr(response, "\r\n");
     if (!list_start) {
         return;
     }
     list_start += 2;
 
-    while (*list_start) {
+    while (*list_start && group_index < 100) {
         char *next_line = strstr(list_start, "\r\n");
+        
+        // Tính độ dài của dòng hiện tại
+        size_t line_len;
         if (next_line) {
-            *next_line = '\0';
+            line_len = next_line - list_start;
+        } else {
+            line_len = strlen(list_start);
         }
 
-        if (strlen(list_start) == 0) {
+        if (line_len == 0) {
             if (!next_line) break;
             list_start = next_line + 2;
             continue;
         }
 
+        // Copy dòng để parse (không modify response buffer)
         char line_copy[BUFFER_SIZE];
-        strncpy(line_copy, list_start, sizeof(line_copy) - 1);
-        line_copy[sizeof(line_copy) - 1] = '\0';
+        if (line_len >= sizeof(line_copy)) {
+            line_len = sizeof(line_copy) - 1;
+        }
+        memcpy(line_copy, list_start, line_len);
+        line_copy[line_len] = '\0';
 
+        // Parse tokens
         char *group_id = strtok(line_copy, "|");
         char *group_name = strtok(NULL, "|");
         char *role = strtok(NULL, "|");
@@ -692,7 +707,7 @@ void handle_list_groups() {
         const char *safe_created = created_at && strlen(created_at) > 0 ? created_at : "-";
         const char *safe_desc = (description && strlen(description) > 0) ? description : "(không mô tả)";
 
-        // Định dạng vai trò với icon
+        // Hiển thị trong bảng
         if (strcmp(safe_role, "admin") == 0) {
             printf("│ %-4.4s │ %-28.28s │ Admin    │ %-19.19s │ %-28.28s │\n",
                    safe_id, safe_name, safe_created, safe_desc);
@@ -701,45 +716,21 @@ void handle_list_groups() {
                    safe_id, safe_name, safe_created, safe_desc);
         }
 
+        // Lưu mapping group_id -> role
+        if (group_id && role) {
+            group_ids[group_index] = atoi(group_id);
+            strncpy(roles[group_index], role, sizeof(roles[0]) - 1);
+            roles[group_index][sizeof(roles[0]) - 1] = '\0';
+            group_index++;
+        }
+
         if (!next_line) break;
         list_start = next_line + 2;
     }
 
     printf("%s", table_bottom);
 
-    // Lưu mapping group_id -> role để biết quyền
-    int group_ids[100];
-    char roles[100][20];
-    int group_index = 0;
 
-    // Parse lại để lưu role
-    list_start = strstr(response, "\r\n");
-    if (list_start) list_start += 2;
-
-    while (list_start && *list_start && group_index < 100) {
-        char *next_line = strstr(list_start, "\r\n");
-        if (next_line) *next_line = '\0';
-
-        if (strlen(list_start) > 0) {
-            char line_copy[BUFFER_SIZE];
-            strncpy(line_copy, list_start, sizeof(line_copy) - 1);
-            line_copy[sizeof(line_copy) - 1] = '\0';
-
-            char *gid = strtok(line_copy, "|");
-            strtok(NULL, "|"); // group_name
-            char *role = strtok(NULL, "|");
-
-            if (gid && role) {
-                group_ids[group_index] = atoi(gid);
-                strncpy(roles[group_index], role, sizeof(roles[0]) - 1);
-                roles[group_index][sizeof(roles[0]) - 1] = '\0';
-                group_index++;
-            }
-        }
-
-        if (!next_line) break;
-        list_start = next_line + 2;
-    }
 
     // Prompt user để chọn nhóm
     printf("\nNhập ID nhóm để truy cập (hoặc 0 để quay lại): ");
@@ -757,13 +748,16 @@ void handle_list_groups() {
 
     // Tìm role của user trong group này
     char user_role[20] = "member";
+    int role_found = 0;
     for (int i = 0; i < group_index; i++) {
         if (group_ids[i] == selected_group_id) {
             strncpy(user_role, roles[i], sizeof(user_role) - 1);
             user_role[sizeof(user_role) - 1] = '\0';
+            role_found = 1;
             break;
         }
     }
+    
 
     // Gọi hàm truy cập nhóm với role
     handle_group_access(selected_group_id, user_role);
@@ -1532,7 +1526,7 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
         else if (strcasecmp(action, "N") == 0) {
             handle_create_folder(group_id, dir_id);
         }
-        else if (strcasecmp(action, "D") == 0 && is_admin) {
+        else if (strcasecmp(action, "X") == 0 && is_admin) {
             handle_delete_item(group_id);
         }
         else if (strcasecmp(action, "R") == 0 && is_admin) {

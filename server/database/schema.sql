@@ -146,9 +146,9 @@ BEGIN
     SELECT
         g.group_id,
         g.group_name,
-        COALESCE(g.description, '') AS description,
         ug.role,
-        g.created_at
+        g.created_at,
+        COALESCE(g.description, '') AS description
     FROM `groups` g
     JOIN user_groups ug ON g.group_id = ug.group_id
     WHERE ug.user_id = p_user_id
