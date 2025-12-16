@@ -800,11 +800,12 @@ void process_command(int idx, const char *line, int line_len) {
             MYSQL_ROW row;
             while ((row = mysql_fetch_row(res))) {
                 group_count++;
+                // Stored procedure trả về: group_id, group_name, role, created_at, description
                 const char *group_id = row[0] ? row[0] : "";
                 const char *group_name = row[1] ? row[1] : "";
-                const char *description = row[2] ? row[2] : "";
-                const char *role = row[3] ? row[3] : "";
-                const char *created_at = row[4] ? row[4] : "";
+                const char *role = row[2] ? row[2] : "";
+                const char *created_at = row[3] ? row[3] : "";
+                const char *description = row[4] ? row[4] : "";
 
                 int written = snprintf(groups_buffer + groups_len,
                                        sizeof(groups_buffer) - groups_len,
@@ -2258,6 +2259,314 @@ void process_command(int idx, const char *line, int line_len) {
                  members_data, group_id);
         enqueue_send(idx, response, strlen(response));
         printf("[LIST_GROUP_MEMBERS] Sent response: %s", response);
+        return;
+    }
+
+    // ============================
+    // LIST_FOLDER_CONTENT token group_id dir_id
+    // ============================
+    if (strcasecmp(cmd, "LIST_FOLDER_CONTENT") == 0) {
+        char *token = next_token(&ptr);
+        char *group_id_str = next_token(&ptr);
+        char *dir_id_str = next_token(&ptr);
+
+        if (!token || !group_id_str) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int group_id = atoi(group_id_str);
+        int dir_id = dir_id_str ? atoi(dir_id_str) : 0;
+
+        if (group_id <= 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Check if user is member of the group
+        int membership = user_in_group(user_id, group_id);
+        if (membership != 1) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // If dir_id is 0, get root directory of the group
+        if (dir_id == 0) {
+            char query[512];
+            snprintf(query, sizeof(query),
+                     "SELECT root_dir_id FROM `groups` WHERE group_id=%d", group_id);
+
+            if (mysql_query(conn, query) != 0) {
+                fprintf(stderr, "MySQL Error: %s\n", mysql_error(conn));
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            MYSQL_RES *res = mysql_store_result(conn);
+            if (!res || mysql_num_rows(res) == 0) {
+                if (res) mysql_free_result(res);
+                snprintf(response, sizeof(response), "404\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            MYSQL_ROW row = mysql_fetch_row(res);
+            if (row[0]) {
+                dir_id = atoi(row[0]);
+            }
+            mysql_free_result(res);
+        }
+
+        // Get parent_dir_id of current directory
+        int parent_dir_id = 0;
+        char query[1024];
+        snprintf(query, sizeof(query),
+                 "SELECT parent_dir_id FROM directories WHERE dir_id=%d", dir_id);
+
+        if (mysql_query(conn, query) == 0) {
+            MYSQL_RES *res = mysql_store_result(conn);
+            if (res && mysql_num_rows(res) > 0) {
+                MYSQL_ROW row = mysql_fetch_row(res);
+                if (row[0]) {
+                    parent_dir_id = atoi(row[0]);
+                }
+            }
+            if (res) mysql_free_result(res);
+        }
+
+        // Build response with directories and files
+        char content_data[BUFFER_SIZE * 8] = {0};
+
+        // Get subdirectories
+        snprintf(query, sizeof(query),
+                 "SELECT d.dir_id, d.dir_name, 'D' as type, 0 as file_size "
+                 "FROM directories d "
+                 "WHERE d.parent_dir_id=%d AND d.group_id=%d AND d.is_deleted=0 "
+                 "ORDER BY d.dir_name ASC",
+                 dir_id, group_id);
+
+        if (mysql_query(conn, query) != 0) {
+            fprintf(stderr, "MySQL Error (get dirs): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res) {
+            fprintf(stderr, "MySQL Error (store dirs): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int first = 1;
+        MYSQL_ROW row;
+
+        // Format: D|dir_id|dir_name<SPACE>...
+        while ((row = mysql_fetch_row(res))) {
+            if (!first) strcat(content_data, " ");
+            first = 0;
+
+            char entry[512];
+            snprintf(entry, sizeof(entry), "D|%s|%s",
+                     row[0] ? row[0] : "?",  // dir_id
+                     row[1] ? row[1] : "?"); // dir_name
+            strcat(content_data, entry);
+        }
+        mysql_free_result(res);
+
+        // Get files in current directory
+        snprintf(query, sizeof(query),
+                 "SELECT f.file_id, f.file_name, f.file_size "
+                 "FROM files f "
+                 "WHERE f.dir_id=%d AND f.group_id=%d AND f.is_deleted=0 "
+                 "ORDER BY f.file_name ASC",
+                 dir_id, group_id);
+
+        if (mysql_query(conn, query) != 0) {
+            fprintf(stderr, "MySQL Error (get files): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        res = mysql_store_result(conn);
+        if (!res) {
+            fprintf(stderr, "MySQL Error (store files): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Format: F|file_id|file_name|file_size<SPACE>...
+        while ((row = mysql_fetch_row(res))) {
+            if (!first) strcat(content_data, " ");
+            first = 0;
+
+            char entry[512];
+            snprintf(entry, sizeof(entry), "F|%s|%s|%s",
+                     row[0] ? row[0] : "?",  // file_id
+                     row[1] ? row[1] : "?",  // file_name
+                     row[2] ? row[2] : "0"); // file_size
+            strcat(content_data, entry);
+        }
+        mysql_free_result(res);
+
+        // Response: "200 current_dir_id parent_dir_id D|dir_id|dir_name<SPACE>... F|file_id|file_name|file_size<SPACE>...<CRLF>"
+        snprintf(response, sizeof(response), "200 %d %d%s%s\r\n",
+                 dir_id,
+                 parent_dir_id,
+                 strlen(content_data) > 0 ? " " : "",
+                 content_data);
+
+        enqueue_send(idx, response, strlen(response));
+        printf("[LIST_FOLDER_CONTENT] Sent for dir_id=%d, parent=%d, group_id=%d\n", dir_id, parent_dir_id, group_id);
+        return;
+    }
+
+    // ============================
+    // CREATE_FOLDER token group_id parent_dir_id folder_name
+    // ============================
+    if (strcasecmp(cmd, "CREATE_FOLDER") == 0) {
+        char *token = next_token(&ptr);
+        char *group_id_str = next_token(&ptr);
+        char *parent_dir_id_str = next_token(&ptr);
+        char *folder_name = next_token(&ptr);
+
+        if (!token || !group_id_str || !parent_dir_id_str || !folder_name) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int group_id = atoi(group_id_str);
+        int parent_dir_id = atoi(parent_dir_id_str);
+
+        if (group_id <= 0 || parent_dir_id < 0) {
+            snprintf(response, sizeof(response), "400\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "401\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Check if user is member of the group
+        int membership = user_in_group(user_id, group_id);
+        if (membership != 1) {
+            snprintf(response, sizeof(response), "403\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // If parent_dir_id is 0, get root directory
+        if (parent_dir_id == 0) {
+            char query[512];
+            snprintf(query, sizeof(query),
+                     "SELECT root_dir_id FROM `groups` WHERE group_id=%d", group_id);
+
+            if (mysql_query(conn, query) != 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            MYSQL_RES *res = mysql_store_result(conn);
+            if (!res || mysql_num_rows(res) == 0) {
+                if (res) mysql_free_result(res);
+                snprintf(response, sizeof(response), "404\r\n");
+                enqueue_send(idx, response, strlen(response));
+                return;
+            }
+
+            MYSQL_ROW row = mysql_fetch_row(res);
+            if (row[0]) {
+                parent_dir_id = atoi(row[0]);
+            }
+            mysql_free_result(res);
+        }
+
+        // Validate parent directory belongs to group
+        int dir_valid = dir_belongs_to_group(parent_dir_id, group_id);
+        if (dir_valid != 1) {
+            snprintf(response, sizeof(response), "404\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        // Check if folder name already exists in parent directory
+        char query[1024];
+        snprintf(query, sizeof(query),
+                 "SELECT 1 FROM directories WHERE parent_dir_id=%d AND dir_name='%s' AND is_deleted=0 LIMIT 1",
+                 parent_dir_id, folder_name);
+
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res) {
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        if (mysql_num_rows(res) > 0) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "409\r\n"); // Conflict
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+        mysql_free_result(res);
+
+        // Create new folder
+        snprintf(query, sizeof(query),
+                 "INSERT INTO directories (dir_name, parent_dir_id, group_id, created_by) "
+                 "VALUES ('%s', %d, %d, %d)",
+                 folder_name, parent_dir_id, group_id, user_id);
+
+        if (mysql_query(conn, query) != 0) {
+            fprintf(stderr, "MySQL Error (create folder): %s\n", mysql_error(conn));
+            snprintf(response, sizeof(response), "500\r\n");
+            enqueue_send(idx, response, strlen(response));
+            return;
+        }
+
+        int new_dir_id = (int)mysql_insert_id(conn);
+
+        // Log activity
+        snprintf(query, sizeof(query),
+                 "INSERT INTO activity_log (user_id, description, group_id) "
+                 "VALUES (%d, 'create_directory', %d)",
+                 user_id, group_id);
+        mysql_query(conn, query);
+
+        snprintf(response, sizeof(response), "200\r\n");
+        enqueue_send(idx, response, strlen(response));
+        printf("[CREATE_FOLDER] Created folder '%s' with ID %d in parent_dir_id=%d\n",
+               folder_name, new_dir_id, parent_dir_id);
         return;
     }
 

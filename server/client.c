@@ -12,7 +12,7 @@
 #include <ctype.h>
 
 #define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 3000
+#define SERVER_PORT 1234
 #define BUFFER_SIZE 4096
 #define TOKEN_LENGTH 32
 
@@ -45,6 +45,8 @@ void handle_view_my_invitations();
 void handle_upload_file(int group_id);
 void handle_download_file(int group_id);
 void handle_list_members(int group_id);
+void handle_list_folder_content(int group_id, int dir_id, int is_admin);
+void handle_create_folder(int group_id, int parent_dir_id);
 void handle_delete_item(int group_id);
 void handle_rename_item(int group_id);
 void handle_move_item(int group_id);
@@ -101,7 +103,8 @@ int is_token_valid() {
         return 0;
     }
 
-    int sock = connect_to_server();
+    // Tạo kết nối mới (không dùng global_sock)
+    int sock = create_new_connection();
     if (sock < 0) {
         return 0;
     }
@@ -114,6 +117,8 @@ int is_token_valid() {
     // Nhận response
     char response[BUFFER_SIZE] = {0};
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
+    close(sock);  // Đóng socket ngay sau khi nhận response
+
     if (bytes > 0) {
         response[bytes] = '\0';
         char *crlf = strstr(response, "\r\n");
@@ -160,30 +165,51 @@ void print_menu() {
     if (logged_in) {
         printf("Trạng thái: ✓ Đã đăng nhập\n");
         printf("=========================================\n");
-        printf("1. Create Group (Tạo nhóm)\n");
-        printf("2. View My Groups (Xem nhóm của tôi)\n");
-        printf("3. Request Join Group (Xin vào nhóm)\n");
-        printf("4. [Admin] Approve Join Requests (Phê duyệt yêu cầu tham gia)\n");
-        printf("5. View My Invitations (Xem lời mời của tôi)\n");
-        printf("6. Logout (Đăng xuất)\n");
-        printf("7. Exit (Thoát)\n");
+        printf("1. Tạo nhóm\n");
+        printf("2. Xem nhóm của tôi\n");
+        printf("3. Xin vào nhóm\n");
+        printf("4. Phê duyệt yêu cầu tham gia nhóm (Admin)\n");
+        printf("5. Xem lời mời tham gia nhóm\n");
+        printf("6. Đăng xuất\n");
+        printf("7. Thoát\n");
     } else {
         printf("Trạng thái: ✗ Chưa đăng nhập\n");
         printf("=========================================\n");
-        printf("1. Register (Đăng ký)\n");
-        printf("2. Login (Đăng nhập)\n");
-        printf("3. Exit (Thoát)\n");
+        printf("1. Đăng ký\n");
+        printf("2. Đăng nhập\n");
+        printf("3. Thoát\n");
     }
     printf("=========================================\n");
     printf("Chọn chức năng: ");
 }
 
-int connect_to_server() {
-    // Nếu đã có kết nối, sử dụng lại
-    if (global_sock > 0) {
-        return global_sock;
+// Tạo kết nối mới không dùng global_sock
+int create_new_connection() {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
     }
 
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(SERVER_PORT);
+
+    if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+int connect_to_server() {
+    // Luôn tạo kết nối mới để tránh vấn đề socket đã đóng
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");
@@ -207,7 +233,6 @@ int connect_to_server() {
         return -1;
     }
 
-    global_sock = sock;
     return sock;
 }
 
@@ -629,9 +654,14 @@ void handle_list_groups() {
         "└──────┴──────────────────────────────┴──────────┴─────────────────────┴──────────────────────────────┘\n";
 
     printf("%s", table_border);
-    printf("│ %-4s │ %-29s │ %-10s │ %-24s │ %-28s │\n",
+    printf("│ %-4s │ %-29s  │ %-10s│ %-23s│ %-30s  │\n",
         "ID", "Tên nhóm", "Vai trò", "Ngày tạo", "Mô tả");
     printf("%s", table_separator);
+
+    // Lưu mapping group_id -> role
+    int group_ids[100];
+    char roles[100][20];
+    int group_index = 0;
 
     char *list_start = strstr(response, "\r\n");
     if (!list_start) {
@@ -639,22 +669,32 @@ void handle_list_groups() {
     }
     list_start += 2;
 
-    while (*list_start) {
+    while (*list_start && group_index < 100) {
         char *next_line = strstr(list_start, "\r\n");
+
+        // Tính độ dài của dòng hiện tại
+        size_t line_len;
         if (next_line) {
-            *next_line = '\0';
+            line_len = next_line - list_start;
+        } else {
+            line_len = strlen(list_start);
         }
 
-        if (strlen(list_start) == 0) {
+        if (line_len == 0) {
             if (!next_line) break;
             list_start = next_line + 2;
             continue;
         }
 
+        // Copy dòng để parse (không modify response buffer)
         char line_copy[BUFFER_SIZE];
-        strncpy(line_copy, list_start, sizeof(line_copy) - 1);
-        line_copy[sizeof(line_copy) - 1] = '\0';
+        if (line_len >= sizeof(line_copy)) {
+            line_len = sizeof(line_copy) - 1;
+        }
+        memcpy(line_copy, list_start, line_len);
+        line_copy[line_len] = '\0';
 
+        // Parse tokens
         char *group_id = strtok(line_copy, "|");
         char *group_name = strtok(NULL, "|");
         char *role = strtok(NULL, "|");
@@ -667,13 +707,21 @@ void handle_list_groups() {
         const char *safe_created = created_at && strlen(created_at) > 0 ? created_at : "-";
         const char *safe_desc = (description && strlen(description) > 0) ? description : "(không mô tả)";
 
-        // Định dạng vai trò với icon
+        // Hiển thị trong bảng
         if (strcmp(safe_role, "admin") == 0) {
-            printf("│ %-4.4s │ %-28.28s │ Admin │ %-19.19s │ %-28.28s │\n",
+            printf("│ %-4.4s │ %-28.28s │ Admin    │ %-19.19s │ %-28.28s │\n",
                    safe_id, safe_name, safe_created, safe_desc);
         } else {
-            printf("│ %-4.4s │ %-28.28s │ Member│ %-19.19s │ %-28.28s │\n",
+            printf("│ %-4.4s │ %-28.28s │ Member   │ %-19.19s │ %-28.28s │\n",
                    safe_id, safe_name, safe_created, safe_desc);
+        }
+
+        // Lưu mapping group_id -> role
+        if (group_id && role) {
+            group_ids[group_index] = atoi(group_id);
+            strncpy(roles[group_index], role, sizeof(roles[0]) - 1);
+            roles[group_index][sizeof(roles[0]) - 1] = '\0';
+            group_index++;
         }
 
         if (!next_line) break;
@@ -682,39 +730,7 @@ void handle_list_groups() {
 
     printf("%s", table_bottom);
 
-    // Lưu mapping group_id -> role để biết quyền
-    int group_ids[100];
-    char roles[100][20];
-    int group_index = 0;
 
-    // Parse lại để lưu role
-    list_start = strstr(response, "\r\n");
-    if (list_start) list_start += 2;
-
-    while (list_start && *list_start && group_index < 100) {
-        char *next_line = strstr(list_start, "\r\n");
-        if (next_line) *next_line = '\0';
-
-        if (strlen(list_start) > 0) {
-            char line_copy[BUFFER_SIZE];
-            strncpy(line_copy, list_start, sizeof(line_copy) - 1);
-            line_copy[sizeof(line_copy) - 1] = '\0';
-
-            char *gid = strtok(line_copy, "|");
-            strtok(NULL, "|"); // group_name
-            char *role = strtok(NULL, "|");
-
-            if (gid && role) {
-                group_ids[group_index] = atoi(gid);
-                strncpy(roles[group_index], role, sizeof(roles[0]) - 1);
-                roles[group_index][sizeof(roles[0]) - 1] = '\0';
-                group_index++;
-            }
-        }
-
-        if (!next_line) break;
-        list_start = next_line + 2;
-    }
 
     // Prompt user để chọn nhóm
     printf("\nNhập ID nhóm để truy cập (hoặc 0 để quay lại): ");
@@ -732,13 +748,16 @@ void handle_list_groups() {
 
     // Tìm role của user trong group này
     char user_role[20] = "member";
+    int role_found = 0;
     for (int i = 0; i < group_index; i++) {
         if (group_ids[i] == selected_group_id) {
             strncpy(user_role, roles[i], sizeof(user_role) - 1);
             user_role[sizeof(user_role) - 1] = '\0';
+            role_found = 1;
             break;
         }
     }
+
 
     // Gọi hàm truy cập nhóm với role
     handle_group_access(selected_group_id, user_role);
@@ -747,33 +766,24 @@ void handle_list_groups() {
 void handle_group_access(int group_id, const char *user_role) {
     int is_admin = (strcmp(user_role, "admin") == 0);
 
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║   NHÓM #%d - Vai trò: %-8s%s ║\n",
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│   Nhóm #%-3d - Vai trò: %-12s        │\n",
            group_id,
-           user_role,
-           is_admin ? " " : "");
-    printf("╚════════════════════════════════════════════╝\n");
+           user_role);
+    printf("└────────────────────────────────────────────┘\n");
 
     while (1) {
         printf("\n┌─────────────────────────────────────────┐\n");
         printf("│         QUẢN LÝ NHÓM - MENU             │\n");
         printf("├─────────────────────────────────────────┤\n");
-        printf("│ 1. Xem danh sách file/thư mục        │\n");
-        printf("│ 2. Upload file                       │\n");
-        printf("│ 3. Download file                     │\n");
-        printf("│ 4. Tạo thư mục mới                   │\n");
-        printf("│ 5. Xem thành viên nhóm               │\n");
-        printf("│ 6. Xem lịch sử hoạt động             │\n");
+        printf("│ 1. Quản lý File/Folder                  │\n");
+        printf("│ 2. Xem thành viên nhóm                  │\n");
 
         if (is_admin) {
-            printf("│ 7. Mời user vào nhóm (Admin)        │\n");
-            printf("│ 8. Xóa file/thư mục (Admin)         │\n");
-            printf("│ 9. Đổi tên file/thư mục (Admin)     │\n");
-            printf("│ 10. Di chuyển file/thư mục (Admin)  │\n");
-            printf("│ 11. Sao chép file/thư mục (Admin)   │\n");
+            printf("│ 3. Mời user vào nhóm (Admin)            │\n");
         }
 
-        printf("│ 0. Quay lại                          │\n");
+        printf("│ 0. Quay lại                             │\n");
         printf("└─────────────────────────────────────────┘\n");
         printf("Chọn chức năng: ");
 
@@ -787,57 +797,14 @@ void handle_group_access(int group_id, const char *user_role) {
 
         switch (choice) {
             case 1:
-                printf("\nTính năng đang phát triển: Xem danh sách file/thư mục\n");
-                // TODO: implement handle_list_files(group_id);
+                handle_list_folder_content(group_id, 0, is_admin);
                 break;
             case 2:
-                handle_upload_file(group_id);
-                break;
-            case 3:
-                handle_download_file(group_id);
-                break;
-            case 4:
-                printf("\nTính năng đang phát triển: Tạo thư mục\n");
-                // TODO: implement handle_create_directory(group_id);
-                break;
-            case 5:
                 handle_list_members(group_id);
                 break;
-            case 6:
-                printf("\nTính năng đang phát triển: Lịch sử hoạt động\n");
-                // TODO: implement handle_activity_log(group_id);
-                break;
-            case 7:
+            case 3:
                 if (is_admin) {
                     handle_invite_user(group_id);
-                } else {
-                    printf("Lựa chọn không hợp lệ!\n");
-                }
-                break;
-            case 8:
-                if (is_admin) {
-                    handle_delete_item(group_id);
-                } else {
-                    printf("Lựa chọn không hợp lệ!\n");
-                }
-                break;
-            case 9:
-                if (is_admin) {
-                    handle_rename_item(group_id);
-                } else {
-                    printf("Lựa chọn không hợp lệ!\n");
-                }
-                break;
-            case 10:
-                if (is_admin) {
-                    handle_move_item(group_id);
-                } else {
-                    printf("Lựa chọn không hợp lệ!\n");
-                }
-                break;
-            case 11:
-                if (is_admin) {
-                    handle_copy_item(group_id);
                 } else {
                     printf("Lựa chọn không hợp lệ!\n");
                 }
@@ -847,18 +814,18 @@ void handle_group_access(int group_id, const char *user_role) {
                 return;
             default:
                 if (is_admin) {
-                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-11.\n");
+                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-3.\n");
                 } else {
-                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-6.\n");
+                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-3.\n");
                 }
         }
     }
 }
 
 void handle_invite_user(int group_id) {
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║        MỜI USER VÀO NHÓM               ║\n");
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│        MỜI USER VÀO NHÓM                   │\n");
+    printf("└────────────────────────────────────────────┘\n");
 
     printf("\nNhập username của người bạn muốn mời (hoặc '0' để quay lại): ");
     char username[256];
@@ -983,9 +950,9 @@ void handle_invite_user(int group_id) {
 }
 
 void handle_delete_item(int group_id) {
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║          XÓA FILE/THƯ MỤC               ║\n");
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│          XÓA FILE/THƯ MỤC                  │\n");
+    printf("└────────────────────────────────────────────┘\n");
 
     printf("\n Loại (F=File, D=Directory): ");
     char type[10];
@@ -1158,9 +1125,9 @@ void handle_list_members(int group_id) {
     }
     free(temp);
 
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║         DANH SÁCH THÀNH VIÊN NHÓM #%-3d    ║\n", group_id);
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│         DANH SÁCH THÀNH VIÊN NHÓM #%-3d     │\n", group_id);
+    printf("└────────────────────────────────────────────┘\n");
     printf("\nTổng số thành viên: %d\n\n", member_count);
 
     const char *table_border =
@@ -1200,9 +1167,9 @@ void handle_list_members(int group_id) {
                 if (username && role && strlen(username) > 0 && strlen(role) > 0) {
                     // Hiển thị với icon cho role
                     if (strcmp(role, "admin") == 0) {
-                        printf("│ %-28s │ Admin     │\n", username);
+                        printf("│ %-28s │  Admin       │\n", username);
                     } else {
-                        printf("│ %-28s │ Member    │\n", username);
+                        printf("│ %-28s │  Member      │\n", username);
                     }
                 }
             }
@@ -1215,10 +1182,372 @@ void handle_list_members(int group_id) {
     printf("\nXem thành viên thành công!\n");
 }
 
+void handle_create_folder(int group_id, int parent_dir_id) {
+    if (!is_token_valid()) {
+        printf(" Bạn cần đăng nhập để tạo thư mục!\n");
+        return;
+    }
+
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│               TẠO THƯ MỤC MỚI              │\n");
+    printf("└────────────────────────────────────────────┘\n");
+
+    printf("\nNhập tên thư mục mới (hoặc '0' để hủy): ");
+    char folder_name[256];
+    if (fgets(folder_name, sizeof(folder_name), stdin) == NULL) {
+        printf("Lỗi đọc dữ liệu!\n");
+        return;
+    }
+
+    // Trim newline
+    size_t len = strlen(folder_name);
+    while (len > 0 && (folder_name[len - 1] == '\n' || folder_name[len - 1] == '\r')) {
+        folder_name[len - 1] = '\0';
+        len--;
+    }
+
+    if (strlen(folder_name) == 0) {
+        printf("Tên thư mục không được để trống!\n");
+        return;
+    }
+
+    if (strcmp(folder_name, "0") == 0) {
+        printf("Hủy tạo thư mục...\n");
+        return;
+    }
+
+    int sock = connect_to_server();
+    if (sock < 0) {
+        printf("Không thể kết nối đến server!\n");
+        return;
+    }
+
+    // Gửi lệnh CREATE_FOLDER
+    char command[BUFFER_SIZE];
+    snprintf(command, sizeof(command), "CREATE_FOLDER %s %d %d %s\r\n",
+             current_token, group_id, parent_dir_id, folder_name);
+    send(sock, command, strlen(command), 0);
+
+    // Nhận response
+    char response[BUFFER_SIZE] = {0};
+    int bytes = recv(sock, response, sizeof(response) - 1, 0);
+    if (bytes <= 0) {
+        printf("Không nhận được phản hồi từ server.\n");
+        close(sock);
+        return;
+    }
+    response[bytes] = '\0';
+
+    char *crlf = strstr(response, "\r\n");
+    if (crlf) *crlf = '\0';
+
+    int status_code = 0;
+    if (sscanf(response, "%d", &status_code) < 1) {
+        printf("Phản hồi không hợp lệ: %s\n", response);
+        close(sock);
+        return;
+    }
+
+    close(sock);
+
+    switch (status_code) {
+        case 200:
+            printf("Tạo thư mục '%s' thành công!\n", folder_name);
+            break;
+        case 400:
+            printf("Yêu cầu không hợp lệ!\n");
+            break;
+        case 401:
+            printf("Token không hợp lệ hoặc đã hết hạn!\n");
+            break;
+        case 403:
+            printf("Bạn không có quyền tạo thư mục trong nhóm này!\n");
+            break;
+        case 404:
+            printf("Thư mục cha không tồn tại!\n");
+            break;
+        case 409:
+            printf("Thư mục '%s' đã tồn tại trong thư mục này!\n", folder_name);
+            break;
+        case 500:
+            printf("Lỗi server!\n");
+            break;
+        default:
+            printf("Lỗi không xác định (code: %d)\n", status_code);
+    }
+}
+
+void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
+    if (!is_token_valid()) {
+        printf("Bạn cần đăng nhập để xem nội dung!\n");
+        return;
+    }
+
+    while (1) {
+        int sock = connect_to_server();
+        if (sock < 0) {
+            printf("Không thể kết nối đến server!\n");
+            return;
+        }
+
+        // Gửi lệnh LIST_FOLDER_CONTENT
+        char command[BUFFER_SIZE];
+        snprintf(command, sizeof(command), "LIST_FOLDER_CONTENT %s %d %d\r\n",
+                 current_token, group_id, dir_id);
+        send(sock, command, strlen(command), 0);
+
+        // Nhận response
+        char response[BUFFER_SIZE * 8] = {0};
+        int bytes = recv(sock, response, sizeof(response) - 1, 0);
+        if (bytes <= 0) {
+            printf("Không nhận được phản hồi từ server.\n");
+            return;
+        }
+        response[bytes] = '\0';
+
+        // Parse response
+        char *crlf = strstr(response, "\r\n");
+        if (crlf) *crlf = '\0';
+
+        int status_code = 0;
+        int current_dir_id = 0;
+        int parent_dir_id = 0;
+        char *data_start = NULL;
+
+        // Parse: "200 current_dir_id parent_dir_id D|..."
+        char *ptr = response;
+        if (sscanf(ptr, "%d %d %d", &status_code, &current_dir_id, &parent_dir_id) < 2) {
+            printf("Phản hồi không hợp lệ: %s\n", response);
+            close(sock);
+            return;
+        }
+
+        // Tìm vị trí bắt đầu của data (sau 3 số)
+        int space_count = 0;
+        for (char *p = response; *p; p++) {
+            if (*p == ' ') {
+                space_count++;
+                if (space_count == 3) {
+                    data_start = p + 1;
+                    break;
+                }
+            }
+        }
+
+        char *content_start = data_start ? data_start : "";
+
+        if (status_code != 200) {
+            switch (status_code) {
+                case 400:
+                    printf("Yêu cầu không hợp lệ!\n");
+                    break;
+                case 401:
+                    printf("Token không hợp lệ hoặc đã hết hạn!\n");
+                    break;
+                case 403:
+                    printf("Bạn không có quyền truy cập!\n");
+                    break;
+                case 404:
+                    printf("Thư mục không tồn tại!\n");
+                    break;
+                case 500:
+                    printf("Lỗi server!\n");
+                    break;
+                default:
+                    printf("Lỗi không xác định (code: %d)\n", status_code);
+            }
+            close(sock);
+            return;
+        }
+
+        // Lưu danh sách items để có thể thao tác
+        typedef struct {
+            char type; // 'D' or 'F'
+            int id;
+            char name[256];
+            long long size;
+        } Item;
+
+        Item items[1000];
+        int item_count = 0;
+
+        // Đếm folders và files
+        int folder_count = 0;
+        int file_count = 0;
+        char *temp = strdup(content_start);
+        char *token = strtok(temp, " ");
+
+        while (token && item_count < 1000) {
+            if (strchr(token, '|')) {
+                char token_copy[512];
+                strncpy(token_copy, token, sizeof(token_copy) - 1);
+                token_copy[sizeof(token_copy) - 1] = '\0';
+
+                char *parts[4] = {NULL, NULL, NULL, NULL};
+                int part_count = 0;
+
+                char *p = token_copy;
+                char *start = p;
+                while (*p && part_count < 4) {
+                    if (*p == '|') {
+                        *p = '\0';
+                        parts[part_count++] = start;
+                        start = p + 1;
+                    }
+                    p++;
+                }
+                if (start && *start) {
+                    parts[part_count++] = start;
+                }
+
+                if (part_count >= 2) {
+                    char *type = parts[0];
+                    char *id_str = parts[1];
+                    char *name = parts[2] ? parts[2] : "?";
+                    char *size = parts[3] ? parts[3] : "0";
+
+                    if (strcmp(type, "D") == 0 && strcmp(name, "..") != 0 && strcmp(name, "ROOT") != 0) {
+                        items[item_count].type = 'D';
+                        items[item_count].id = atoi(id_str);
+                        strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
+                        items[item_count].size = 0;
+                        item_count++;
+                        folder_count++;
+                    } else if (strcmp(type, "F") == 0) {
+                        items[item_count].type = 'F';
+                        items[item_count].id = atoi(id_str);
+                        strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
+                        items[item_count].size = atoll(size);
+                        item_count++;
+                        file_count++;
+                    }
+                }
+            }
+            token = strtok(NULL, " ");
+        }
+        free(temp);
+
+        // Đóng socket sau khi nhận xong response
+        close(sock);
+
+        // Hiển thị danh sách
+        printf("\n┌───────────────────────────────────────────────────────────────────┐\n");
+        printf("│              FILE EXPLORER - NHÓM #%-3d                            │\n", group_id);
+        printf("└───────────────────────────────────────────────────────────────────┘\n");
+        printf("\n Tổng: %d thư mục, %d file\n\n", folder_count, file_count);
+
+        const char *table_border =
+            "┌──────┬──────────┬───────┬────────────────────────────────┬──────────────┐\n";
+        const char *table_separator =
+            "├──────┼──────────┼───────┼────────────────────────────────┼──────────────┤\n";
+        const char *table_bottom =
+            "└──────┴──────────┴───────┴────────────────────────────────┴──────────────┘\n";
+
+        printf("%s", table_border);
+        printf("│ %-4s │ %-9s  │ %-5s │ %-30s  │ %-12s   │\n", "STT", "Loại", "ID", "Tên", "Kích thước");
+        printf("%s", table_separator);
+
+        for (int i = 0; i < item_count; i++) {
+            if (items[i].type == 'D') {
+                printf("│ %-4d │ %-8s │ %-5d │ %-30s │ %-12s │\n", i + 1, "Folder", items[i].id, items[i].name, "-");
+            } else {
+                char size_str[20];
+                long long file_size = items[i].size;
+                if (file_size < 1024) {
+                    snprintf(size_str, sizeof(size_str), "%lld B", file_size);
+                } else if (file_size < 1024 * 1024) {
+                    snprintf(size_str, sizeof(size_str), "%.2f KB", file_size / 1024.0);
+                } else if (file_size < 1024 * 1024 * 1024) {
+                    snprintf(size_str, sizeof(size_str), "%.2f MB", file_size / (1024.0 * 1024.0));
+                } else {
+                    snprintf(size_str, sizeof(size_str), "%.2f GB", file_size / (1024.0 * 1024.0 * 1024.0));
+                }
+                printf("│ %-4d │ %-8s │ %-5d │ %-30s │ %-12s │\n", i + 1, "File", items[i].id, items[i].name, size_str);
+            }
+        }
+
+        printf("%s", table_bottom);
+
+        // Menu thao tác
+        printf("\n┌──────────────── MENU THAO TÁC ────────────────┐\n");
+        printf("│ [Số STT]       Xem nội dung thư mục con       │\n");
+        printf("│ ────────────────────────────────────────────  │\n");
+        printf("│ U               Upload file                   │\n");
+        printf("│ D               Download file                 │\n");
+        printf("│ N              Tạo thư mục mới                │\n");
+        if (is_admin) {
+            printf("│ X               Xóa item (Admin)              │\n");
+            printf("│ R               Đổi tên (Admin)               │\n");
+            printf("│ M              Di chuyển (Admin)              │\n");
+            printf("│ C              Sao chép (Admin)               │\n");
+        }
+        printf("│ 0               Quay lại                      │\n");
+        printf("└───────────────────────────────────────────────┘\n");
+        printf("\n Nhập STT của thư mục để xem nội dung bên trong\n\n");
+        printf("Chọn: ");
+
+        char action[10];
+        if (scanf("%9s", action) != 1) {
+            while (getchar() != '\n');
+            printf(" Lựa chọn không hợp lệ!\n");
+            continue;
+        }
+        while (getchar() != '\n');
+
+        // Xử lý số STT
+        if (isdigit(action[0])) {
+            int stt = atoi(action);
+            if (stt == 0) {
+                // Nếu đang ở root (parent_dir_id == 0 hoặc NULL), quay lại menu
+                if (parent_dir_id == 0 || parent_dir_id < 0) {
+                    return;
+                }
+                // Ngược lại, lùi về thư mục cha
+                dir_id = parent_dir_id;
+                continue;
+            } else if (stt > 0 && stt <= item_count) {
+                Item *selected = &items[stt - 1];
+                if (selected->type == 'D') {
+                    // Mở thư mục
+                    dir_id = selected->id;
+                    continue;
+                } else {
+                    // Download file
+                    handle_download_file(group_id);
+                }
+            } else {
+                printf(" STT không hợp lệ!\n");
+            }
+        }
+        // Xử lý các lệnh ký tự
+        else if (strcasecmp(action, "U") == 0) {
+            handle_upload_file(group_id);
+        }
+        else if (strcasecmp(action, "N") == 0) {
+            handle_create_folder(group_id, dir_id);
+        }
+        else if (strcasecmp(action, "X") == 0 && is_admin) {
+            handle_delete_item(group_id);
+        }
+        else if (strcasecmp(action, "R") == 0 && is_admin) {
+            handle_rename_item(group_id);
+        }
+        else if (strcasecmp(action, "M") == 0 && is_admin) {
+            handle_move_item(group_id);
+        }
+        else if (strcasecmp(action, "C") == 0 && is_admin) {
+            handle_copy_item(group_id);
+        }
+        else {
+            printf(" Lệnh không hợp lệ!\n");
+        }
+    }
+}
+
 void handle_rename_item(int group_id) {
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║          ĐỔI TÊN FILE/THƯ MỤC               ║\n");
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│          ĐỔI TÊN FILE/THƯ MỤC               │\n");
+    printf("└────────────────────────────────────────────┘\n");
 
     printf("\n Loại (F=File, D=Directory): ");
     char type[10];
@@ -1317,9 +1646,9 @@ void handle_rename_item(int group_id) {
 }
 
 void handle_move_item(int group_id) {
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║       DI CHUYỂN FILE/THƯ MỤC           ║\n");
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│       DI CHUYỂN FILE/THƯ MỤC           │\n");
+    printf("└────────────────────────────────────────────┘\n");
 
     printf("\n Loại (F=File, D=Directory): ");
     char type[10];
@@ -1426,9 +1755,9 @@ void handle_move_item(int group_id) {
 }
 
 void handle_copy_item(int group_id) {
-    printf("\n╔════════════════════════════════════════════╗\n");
-    printf("║            SAO CHÉP FILE/THƯ MỤC           ║\n");
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│            SAO CHÉP FILE/THƯ MỤC           │\n");
+    printf("└────────────────────────────────────────────┘\n");
 
     printf("\n Loại (F=File, D=Directory): ");
     char type[10];
@@ -2066,9 +2395,9 @@ void handle_view_my_invitations() {
     }
 
     while (1) {  // Loop để có thể xử lý nhiều invitation
-        printf("\n╔════════════════════════════════════════════╗\n");
-        printf("║         LỜI MỜI THAM GIA NHÓM CỦA TÔI      ║\n");
-        printf("╚════════════════════════════════════════════╝\n");
+        printf("\n┌────────────────────────────────────────────┐\n");
+        printf("│         LỜI MỜI THAM GIA NHÓM CỦA TÔI      │\n");
+        printf("└────────────────────────────────────────────┘\n");
 
         int sock = connect_to_server();
         if (sock < 0) {
@@ -2090,9 +2419,11 @@ void handle_view_my_invitations() {
         }
         response[bytes] = '\0';
 
-        // Remove trailing CRLF
-        char *crlf = strstr(response, "\r\n");
-        if (crlf) *crlf = '\0';
+        // Remove trailing CRLF at the end (not the first one)
+        size_t len = strlen(response);
+        if (len >= 2 && response[len-2] == '\r' && response[len-1] == '\n') {
+            response[len-2] = '\0';
+        }
 
         // Parse response: "200 LIST_RECEIVED_INVITATIONS [invitation_1] [invitation_2] ..."
         int status_code = 0;
@@ -2117,7 +2448,6 @@ void handle_view_my_invitations() {
             return;
         }
 
-        // Check if there are invitations
         if (strlen(invitations_data) == 0 || strstr(invitations_data, "[invitation_") == NULL) {
             printf("\nBạn không có lời mời nào đang chờ xử lý.\n");
             return;
@@ -2142,14 +2472,65 @@ void handle_view_my_invitations() {
             if (!colon) break;
 
             // Parse: group_id group_name request_id request_status
-            int group_id, request_id;
-            char group_name[256], status[32];
+            // Copy data để parse (vì sẽ modify chuỗi)
+            char line_buf[512];
+            char *data = colon + 1;
+            while (*data == ' ') data++; // Skip leading spaces
 
-            if (sscanf(colon + 1, "%d %255s %d %31s", &group_id, group_name, &request_id, status) == 4) {
-                printf("│ %-10d │ %-8d │ %-29.29s │ %-12s │\n",
-                       request_id, group_id, group_name, status);
-                invitation_count++;
+            strncpy(line_buf, data, sizeof(line_buf) - 1);
+            line_buf[sizeof(line_buf) - 1] = '\0';
+
+            // Loại bỏ khoảng trắng/newline ở cuối
+            size_t len = strlen(line_buf);
+            while (len > 0 && (line_buf[len-1] == ' ' || line_buf[len-1] == '\n' ||
+                              line_buf[len-1] == '\r' || line_buf[len-1] == '\t')) {
+                line_buf[--len] = '\0';
             }
+
+            if (len == 0) {
+                ptr = colon + 1;
+                while (*ptr && *ptr != '[') ptr++;
+                continue;
+            }
+
+            // Bây giờ parse: "6 code java 7 pending"
+            // Tìm status (từ cuối cùng)
+            char *last_space = strrchr(line_buf, ' ');
+            if (!last_space) {
+                ptr = colon + 1;
+                while (*ptr && *ptr != '[') ptr++;
+                continue;
+            }
+
+            char status[32];
+            strncpy(status, last_space + 1, sizeof(status) - 1);
+            status[sizeof(status) - 1] = '\0';
+            *last_space = '\0'; // Cắt chuỗi: "6 code java 7"
+
+            // Tìm request_id (từ cuối cùng của chuỗi còn lại)
+            char *second_last_space = strrchr(line_buf, ' ');
+            if (!second_last_space) {
+                ptr = colon + 1;
+                while (*ptr && *ptr != '[') ptr++;
+                continue;
+            }
+
+            int request_id = atoi(second_last_space + 1);
+            *second_last_space = '\0'; // Cắt chuỗi: "6 code java"
+
+            // Parse group_id (số đầu tiên)
+            int group_id = atoi(line_buf);
+
+            // Group name là phần còn lại sau group_id
+            char *group_name_start = line_buf;
+            while (*group_name_start && isdigit(*group_name_start)) {
+                group_name_start++;
+            }
+            while (*group_name_start == ' ') group_name_start++;
+
+            printf("│ %-10d │ %-8d │ %-29.29s │ %-12s │\n",
+                   request_id, group_id, group_name_start, status);
+            invitation_count++;
 
             // Move to next invitation
             ptr = colon + 1;
