@@ -1,8 +1,9 @@
 *.o
 *.out
 *.exe
-server
-client
+server/server
+!/server/
+server/client
 server/auth/authenticated_handlers_example.c
 
 # IDE and OS files
