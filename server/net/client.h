@@ -17,6 +17,7 @@ typedef struct {
     int send_offset;
 
     int authenticated;
+    int user_id;
 } Client;
 
 extern Client clients[MAX_CLIENTS];

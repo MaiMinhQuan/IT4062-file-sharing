@@ -5,6 +5,7 @@ server/server
 !/server/
 server/client
 server/auth/authenticated_handlers_example.c
+server/storage
 
 # IDE and OS files
 .DS_Store
@@ -23,6 +24,7 @@ server/auth/authenticated_handlers_example.c
 *.jpg
 *.jpeg
 *.gif
+*.md
 insert_test_data*.sql
 
 # Storage folder
