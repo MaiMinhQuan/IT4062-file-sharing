@@ -12,7 +12,7 @@
 #include <ctype.h>
 
 #define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 3000
+#define SERVER_PORT 1234
 #define BUFFER_SIZE 4096
 #define TOKEN_LENGTH 32
 
