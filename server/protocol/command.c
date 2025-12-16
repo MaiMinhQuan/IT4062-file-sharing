@@ -15,6 +15,7 @@
 #include "../auth/auth.h"
 #include "../auth/token.h"
 #include "../database/db.h"
+#include "../utils/logger.h"
 #include <mysql/mysql.h>
 
 #define BUFFER_SIZE 4096
@@ -439,18 +440,20 @@ static int insert_file_metadata(const char *file_name,
 
 static void send_upload_error(int idx, const char *reason) {
     if (reason) {
-        printf("[UPLOAD_FILE][idx=%d] %s\n", idx, reason);
+        log_error(idx, clients[idx].user_id, "UPLOAD_FILE: %s", reason);
     }
     const char *err = "500\r\n";
     enqueue_send(idx, err, strlen(err));
+    log_send(idx, clients[idx].user_id, "500");
 }
 
 static void send_download_error(int idx, const char *reason) {
     if (reason) {
-        printf("[DOWNLOAD_FILE][idx=%d] %s\n", idx, reason);
+        log_error(idx, clients[idx].user_id, "DOWNLOAD_FILE: %s", reason);
     }
     const char *err = "500\r\n";
     enqueue_send(idx, err, strlen(err));
+    log_send(idx, clients[idx].user_id, "500");
 }
 
 static int encode_base64_chunk(const unsigned char *input, size_t len,
@@ -537,6 +540,34 @@ static char *next_token(char **ptr) {
     *ptr = NULL;  // để gọi tiếp strtok(NULL, ...)
     return tok;
 }
+// Helper function: Send response and log
+static void send_response(int idx, const char *response) {
+    enqueue_send(idx, response, strlen(response));
+    
+    // Create a copy for logging (without \r\n)
+    // For long responses, log first 2000 chars with "..." indicator
+    char log_buf[2048];
+    size_t len = strlen(response);
+    size_t max_log = sizeof(log_buf) - 10;  // Reserve space for "..." and null
+    
+    if (len > max_log) {
+        memcpy(log_buf, response, max_log);
+        strcpy(log_buf + max_log, "...");
+        len = max_log + 3;
+    } else {
+        memcpy(log_buf, response, len);
+    }
+    log_buf[len] = '\0';
+    
+    // Remove trailing \r\n for cleaner logging
+    char *end = log_buf + len - 1;
+    while (end >= log_buf && (*end == '\r' || *end == '\n')) {
+        *end = '\0';
+        end--;
+    }
+    
+    log_send(idx, clients[idx].user_id, "%s", log_buf);
+}
 
 void process_command(int idx, const char *line, int line_len) {
     char buffer[BUFFER_SIZE];
@@ -550,19 +581,23 @@ void process_command(int idx, const char *line, int line_len) {
     strncpy(safe_log, buffer, sizeof(safe_log) - 1);
     safe_log[sizeof(safe_log) - 1] = '\0';
 
-    // Nếu là LOGIN hoặc REGISTER, ẩn password
-    if (strncasecmp(safe_log, "LOGIN ", 6) == 0 || strncasecmp(safe_log, "REGISTER ", 9) == 0) {
-        char *first_space = strchr(safe_log, ' ');
-        if (first_space) {
-            char *second_space = strchr(first_space + 1, ' ');
-            if (second_space) {
-                // Thay password bằng ***
-                snprintf(second_space + 1, safe_log + sizeof(safe_log) - (second_space + 1), "***");
+    // Skip logging for internal VERIFY_TOKEN requests
+    int should_log = (strncasecmp(safe_log, "VERIFY_TOKEN ", 13) != 0);
+
+    if (should_log) {
+        // Nếu là LOGIN hoặc REGISTER, ẩn password
+        if (strncasecmp(safe_log, "LOGIN ", 6) == 0 || strncasecmp(safe_log, "REGISTER ", 9) == 0) {
+            char *first_space = strchr(safe_log, ' ');
+            if (first_space) {
+                char *second_space = strchr(first_space + 1, ' ');
+                if (second_space) {
+                    // Thay password bằng ***
+                    snprintf(second_space + 1, safe_log + sizeof(safe_log) - (second_space + 1), "***");
+                }
             }
         }
+        log_recv(idx, clients[idx].user_id, "%s", safe_log);
     }
-
-    printf("Processing command from idx %d: %s\n", idx, safe_log);
 
     char response[BUFFER_SIZE];
     char raw_line[BUFFER_SIZE];
@@ -571,14 +606,14 @@ void process_command(int idx, const char *line, int line_len) {
     trim_crlf(raw_line);
 
     // ============================
-    // 1️⃣ Parse command
+    // Parse command
     // ============================
     char *ptr = buffer;
     char *cmd = next_token(&ptr);
 
     if (!cmd) {
         snprintf(response, sizeof(response), "ERR EMPTY_COMMAND\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -591,15 +626,20 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!username || !password) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         char resp[256];
-        handle_register(username, password, resp, sizeof(resp));
+        int user_id = handle_register(username, password, resp, sizeof(resp));
+        
+        if (user_id > 0) {
+            clients[idx].user_id = user_id;
+            log_info(idx, user_id, "User registered: username=%s", username);
+        }
 
         snprintf(response, sizeof(response), "%s\r\n", resp);
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -612,15 +652,20 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!username || !password) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         char resp[256];
-        handle_login(username, password, resp, sizeof(resp));
+        int user_id = handle_login(username, password, resp, sizeof(resp));
+        
+        if (user_id > 0) {
+            clients[idx].user_id = user_id;
+            log_info(idx, user_id, "User authenticated: username=%s", username);
+        }
 
         snprintf(response, sizeof(response), "%s\r\n", resp);
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -646,6 +691,7 @@ void process_command(int idx, const char *line, int line_len) {
             snprintf(response, sizeof(response), "401\r\n");  // Token không hợp lệ hoặc hết hạn
         }
 
+        // Không log VERIFY_TOKEN response vì đây là internal check
         enqueue_send(idx, response, strlen(response));
         return;
     }
@@ -658,9 +704,10 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
+        int old_user_id = clients[idx].user_id;
 
         // Xóa token khỏi database
         char escaped_token[256];
@@ -673,11 +720,14 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) == 0 && mysql_affected_rows(conn) > 0) {
             snprintf(response, sizeof(response), "200\r\n");
+            log_info(idx, old_user_id, "User logged out");
+            clients[idx].user_id = 0;  // Clear user_id
         } else {
             snprintf(response, sizeof(response), "500\r\n");
+            log_error(idx, old_user_id, "Logout failed");
         }
 
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -693,7 +743,7 @@ void process_command(int idx, const char *line, int line_len) {
                                      group_name, sizeof(group_name),
                                      description, sizeof(description))) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -701,12 +751,12 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -727,7 +777,7 @@ void process_command(int idx, const char *line, int line_len) {
             } else {
                 snprintf(response, sizeof(response), "500\r\n");
             }
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -749,7 +799,7 @@ void process_command(int idx, const char *line, int line_len) {
             snprintf(response, sizeof(response), "500\r\n");
         }
 
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -757,10 +807,10 @@ void process_command(int idx, const char *line, int line_len) {
     // 7️⃣ LIST_GROUPS_JOINED token
     // ============================
     if (strcasecmp(cmd, "LIST_GROUPS_JOINED") == 0) {
-        char *token = strtok(NULL, " \r\n");
+        char *token = next_token(&ptr);
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -768,12 +818,12 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -782,7 +832,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -826,7 +876,7 @@ void process_command(int idx, const char *line, int line_len) {
         } while (mysql_next_result(conn) == 0);
 
         snprintf(response, sizeof(response), "200 %d\r\n%s", group_count, groups_buffer);
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -839,7 +889,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !group_id_str) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -848,19 +898,19 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int group_id = atoi(group_id_str);
         if (group_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -872,7 +922,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -887,14 +937,14 @@ void process_command(int idx, const char *line, int line_len) {
         // Lấy result_code
         if (mysql_query(conn, "SELECT @result_code") != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         MYSQL_RES *res = mysql_store_result(conn);
         if (!res) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -906,9 +956,9 @@ void process_command(int idx, const char *line, int line_len) {
         mysql_free_result(res);
 
         // Trả về response theo mã trạng thái
-        snprintf(response, sizeof(response), "%d REQUEST_JOIN_GROUP %s\r\n",
-                 result_code, group_id_str);
-        enqueue_send(idx, response, strlen(response));
+        snprintf(response, sizeof(response), "%d\r\n",
+                 result_code);
+        send_response(idx, response);
         return;
     }
 
@@ -921,7 +971,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !group_id_str) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -930,19 +980,19 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int group_id = atoi(group_id_str);
         if (group_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -954,7 +1004,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -969,14 +1019,14 @@ void process_command(int idx, const char *line, int line_len) {
         // Lấy result_code
         if (mysql_query(conn, "SELECT @result_code") != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         MYSQL_RES *res2 = mysql_store_result(conn);
         if (!res2) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -990,7 +1040,7 @@ void process_command(int idx, const char *line, int line_len) {
         // Trả về response theo mã trạng thái
         snprintf(response, sizeof(response), "%d CHECK_ADMIN %s\r\n",
                  result_code2, group_id_str);
-                 enqueue_send(idx, response, strlen(response));
+                 send_response(idx, response);
         return;
     }
     // 🔟 HANDLE_JOIN_REQUEST token request_id option
@@ -1002,7 +1052,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !request_id_str || !option) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1011,26 +1061,26 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int request_id = atoi(request_id_str);
         if (request_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Kiểm tra option hợp lệ
         if (strcasecmp(option, "accepted") != 0 && strcasecmp(option, "rejected") != 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1046,7 +1096,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1061,14 +1111,14 @@ void process_command(int idx, const char *line, int line_len) {
         // Lấy result_code
         if (mysql_query(conn, "SELECT @result_code") != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         MYSQL_RES *res3 = mysql_store_result(conn);
         if (!res3) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1080,9 +1130,9 @@ void process_command(int idx, const char *line, int line_len) {
         mysql_free_result(res3);
 
         // Trả về response theo mã trạng thái
-        snprintf(response, sizeof(response), "%d HANDLE_JOIN_REQUEST %s\r\n",
-                 result_code3, request_id_str);
-        enqueue_send(idx, response, strlen(response));
+        snprintf(response, sizeof(response), "%d\r\n",
+                 result_code3);
+        send_response(idx, response);
         return;
     }
 
@@ -1090,10 +1140,10 @@ void process_command(int idx, const char *line, int line_len) {
     // 🔟 LIST_GROUPS_NOT_JOINED token
     // ============================
     if (strcasecmp(cmd, "LIST_GROUPS_NOT_JOINED") == 0) {
-        char *token = strtok(NULL, " \r\n");
+        char *token = next_token(&ptr);
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1101,12 +1151,12 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1115,7 +1165,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1158,16 +1208,16 @@ void process_command(int idx, const char *line, int line_len) {
         } while (mysql_next_result(conn) == 0);
 
         snprintf(response, sizeof(response), "200 %d\r\n%s", group_count, groups_buffer);
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
     // ⓫ GET_PENDING_REQUESTS token
     // ============================
     if (strcasecmp(cmd, "GET_PENDING_REQUESTS") == 0) {
-        char *token = strtok(NULL, " \r\n");
+        char *token = next_token(&ptr);
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1175,12 +1225,12 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1189,7 +1239,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1233,7 +1283,7 @@ void process_command(int idx, const char *line, int line_len) {
         } while (mysql_next_result(conn) == 0);
 
         snprintf(response, sizeof(response), "200 %d\r\n%s", request_count, requests_buffer);
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -1247,7 +1297,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !group_id_str || !invited_user_id_str) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1256,12 +1306,12 @@ void process_command(int idx, const char *line, int line_len) {
         int admin_user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (admin_user_id < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (admin_user_id == 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1270,7 +1320,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (group_id <= 0 || invited_user_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1282,14 +1332,14 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, check_query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         MYSQL_RES *check_res = mysql_store_result(conn);
         if (!check_res) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1298,7 +1348,7 @@ void process_command(int idx, const char *line, int line_len) {
             // User không thuộc nhóm
             mysql_free_result(check_res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1307,7 +1357,7 @@ void process_command(int idx, const char *line, int line_len) {
             // User không phải admin
             mysql_free_result(check_res);
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         mysql_free_result(check_res);
@@ -1319,7 +1369,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, check_query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1327,7 +1377,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!check_res || mysql_num_rows(check_res) == 0) {
             if (check_res) mysql_free_result(check_res);
             snprintf(response, sizeof(response), "404\r\n"); // User không tồn tại
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         mysql_free_result(check_res);
@@ -1339,7 +1389,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, check_query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1348,7 +1398,7 @@ void process_command(int idx, const char *line, int line_len) {
             // Đã là thành viên
             mysql_free_result(check_res);
             snprintf(response, sizeof(response), "409\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (check_res) mysql_free_result(check_res);
@@ -1361,7 +1411,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, check_query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1370,7 +1420,7 @@ void process_command(int idx, const char *line, int line_len) {
             // Đã gửi lời mời trước đó
             mysql_free_result(check_res);
             snprintf(response, sizeof(response), "423\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (check_res) mysql_free_result(check_res);
@@ -1384,13 +1434,13 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, insert_query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Thành công
         snprintf(response, sizeof(response), "200\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -1402,7 +1452,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!username) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1417,7 +1467,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1425,7 +1475,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n"); // Username không tồn tại
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1435,7 +1485,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         // Trả về user_id
         snprintf(response, sizeof(response), "200 %d\r\n", user_id);
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -1447,7 +1497,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1456,7 +1506,7 @@ void process_command(int idx, const char *line, int line_len) {
         int requester_user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (requester_user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1474,14 +1524,14 @@ void process_command(int idx, const char *line, int line_len) {
         if (mysql_query(conn, query) != 0) {
             fprintf(stderr, "MySQL Error: %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         MYSQL_RES *res = mysql_store_result(conn);
         if (!res) {
-            snprintf(response, sizeof(response), "500 LIST_RECEIVED_INVITATIONS\r\n");
-            enqueue_send(idx, response, strlen(response));
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
             return;
         }
 
@@ -1515,9 +1565,9 @@ void process_command(int idx, const char *line, int line_len) {
 
         mysql_free_result(res);
 
-        // Format: "200 LIST_RECEIVED_INVITATIONS [invitation_1] [invitation_2] ... <CRLF>"
-        snprintf(response, sizeof(response), "200 LIST_RECEIVED_INVITATIONS %s\r\n", invitations_str);
-        enqueue_send(idx, response, strlen(response));
+        // Format: "200 [invitation_1] [invitation_2] ... <CRLF>"
+        snprintf(response, sizeof(response), "200 %s\r\n", invitations_str);
+        send_response(idx, response);
         return;
     }
 
@@ -1532,14 +1582,14 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !request_id_str || !action) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int request_id = atoi(request_id_str);
         if (request_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1548,14 +1598,14 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Kiểm tra action hợp lệ
         if (strcasecmp(action, "accept") != 0 && strcasecmp(action, "reject") != 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1568,7 +1618,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1576,7 +1626,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n"); // Request không tồn tại
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1589,7 +1639,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (strcmp(request_type, "invitation") != 0) {
             mysql_free_result(res);
             snprintf(response, sizeof(response), "403\r\n"); // Không phải invitation
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1597,7 +1647,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (strcmp(status, "pending") != 0) {
             mysql_free_result(res);
             snprintf(response, sizeof(response), "409\r\n"); // Đã xử lý rồi
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1613,7 +1663,7 @@ void process_command(int idx, const char *line, int line_len) {
             if (mysql_query(conn, query) != 0) {
                 // Có thể đã là member rồi
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
@@ -1626,7 +1676,7 @@ void process_command(int idx, const char *line, int line_len) {
             if (mysql_query(conn, query) != 0) {
                 fprintf(stderr, "MySQL Error updating status to accepted: %s\n", mysql_error(conn));
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
@@ -1641,14 +1691,14 @@ void process_command(int idx, const char *line, int line_len) {
             if (mysql_query(conn, query) != 0) {
                 fprintf(stderr, "MySQL Error updating status to rejected: %s\n", mysql_error(conn));
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
             snprintf(response, sizeof(response), "201\r\n"); // Đã từ chối
         }
 
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -1662,7 +1712,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !item_id_str || !type) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1671,21 +1721,21 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int item_id = atoi(item_id_str);
         if (item_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Validate type
         if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1707,7 +1757,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1715,7 +1765,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1727,12 +1777,12 @@ void process_command(int idx, const char *line, int line_len) {
         int is_admin = is_user_admin_of_group(user_id, group_id);
         if (is_admin < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (is_admin == 0) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1744,20 +1794,20 @@ void process_command(int idx, const char *line, int line_len) {
                      item_id);
             if (mysql_query(conn, query) != 0) {
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
         } else {
             // Delete directory recursively (all files and subdirectories)
             if (delete_directory_recursive(item_id) < 0) {
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
         }
 
         snprintf(response, sizeof(response), "200\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -1772,7 +1822,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !item_id_str || !new_name || !type) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1781,21 +1831,21 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int item_id = atoi(item_id_str);
         if (item_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Validate type
         if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1815,7 +1865,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1823,7 +1873,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1835,12 +1885,12 @@ void process_command(int idx, const char *line, int line_len) {
         int is_admin = is_user_admin_of_group(user_id, group_id);
         if (is_admin < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (is_admin == 0) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1861,12 +1911,12 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         snprintf(response, sizeof(response), "200\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -1881,7 +1931,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !item_id_str || !target_dir_id_str || !type) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1890,7 +1940,7 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1899,14 +1949,14 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (item_id <= 0 || target_dir_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Validate type
         if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1926,7 +1976,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1934,7 +1984,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1949,7 +1999,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1957,7 +2007,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1968,7 +2018,7 @@ void process_command(int idx, const char *line, int line_len) {
         // Check if both belong to same group
         if (item_group_id != target_group_id) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1976,12 +2026,12 @@ void process_command(int idx, const char *line, int line_len) {
         int is_admin = is_user_admin_of_group(user_id, item_group_id);
         if (is_admin < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (is_admin == 0) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -1998,12 +2048,12 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         snprintf(response, sizeof(response), "200\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -2018,7 +2068,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !item_id_str || !target_dir_id_str || !type) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2027,7 +2077,7 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2036,14 +2086,14 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (item_id <= 0 || target_dir_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         // Validate type
         if (strcasecmp(type, "F") != 0 && strcasecmp(type, "D") != 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2063,7 +2113,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2071,7 +2121,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2086,7 +2136,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2094,7 +2144,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2105,7 +2155,7 @@ void process_command(int idx, const char *line, int line_len) {
         // Check if both belong to same group
         if (item_group_id != target_group_id) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2113,12 +2163,12 @@ void process_command(int idx, const char *line, int line_len) {
         int is_admin = is_user_admin_of_group(user_id, item_group_id);
         if (is_admin < 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         if (is_admin == 0) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2132,20 +2182,20 @@ void process_command(int idx, const char *line, int line_len) {
                      target_dir_id, user_id, item_id);
             if (mysql_query(conn, query) != 0) {
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
         } else {
             // Copy directory recursively (all files and subdirectories)
             if (copy_directory_recursive(item_id, target_dir_id, user_id) < 0) {
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
         }
 
         snprintf(response, sizeof(response), "200\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -2158,14 +2208,14 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !group_id_str) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         int group_id = atoi(group_id_str);
         if (group_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2174,7 +2224,7 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2186,7 +2236,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (mysql_query(conn, query) != 0) {
             fprintf(stderr, "MySQL Error (check group): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500 LIST_GROUP_MEMBERS %d\r\n", group_id);
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2194,7 +2244,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res || mysql_num_rows(res) == 0) {
             if (res) mysql_free_result(res);
             snprintf(response, sizeof(response), "404 LIST_GROUP_MEMBERS %d\r\n", group_id);
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         mysql_free_result(res);
@@ -2203,7 +2253,7 @@ void process_command(int idx, const char *line, int line_len) {
         int membership = user_in_group(user_id, group_id);
         if (membership != 1) {
             snprintf(response, sizeof(response), "403 LIST_GROUP_MEMBERS %d\r\n", group_id);
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2219,7 +2269,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (mysql_query(conn, query) != 0) {
             fprintf(stderr, "MySQL Error (get members): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500 LIST_GROUP_MEMBERS %d\r\n", group_id);
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2227,7 +2277,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res) {
             fprintf(stderr, "MySQL Error (store result): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500 LIST_GROUP_MEMBERS %d\r\n", group_id);
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2255,10 +2305,9 @@ void process_command(int idx, const char *line, int line_len) {
             strcpy(members_data, "");
         }
 
-        snprintf(response, sizeof(response), "200 LIST_GROUP_MEMBERS %s %d\r\n",
+        snprintf(response, sizeof(response), "200 %s %d\r\n",
                  members_data, group_id);
-        enqueue_send(idx, response, strlen(response));
-        printf("[LIST_GROUP_MEMBERS] Sent response: %s", response);
+        send_response(idx, response);
         return;
     }
 
@@ -2272,7 +2321,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !group_id_str) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2281,7 +2330,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (group_id <= 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2290,7 +2339,7 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2298,7 +2347,7 @@ void process_command(int idx, const char *line, int line_len) {
         int membership = user_in_group(user_id, group_id);
         if (membership != 1) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2311,7 +2360,7 @@ void process_command(int idx, const char *line, int line_len) {
             if (mysql_query(conn, query) != 0) {
                 fprintf(stderr, "MySQL Error: %s\n", mysql_error(conn));
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
@@ -2319,7 +2368,7 @@ void process_command(int idx, const char *line, int line_len) {
             if (!res || mysql_num_rows(res) == 0) {
                 if (res) mysql_free_result(res);
                 snprintf(response, sizeof(response), "404\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
@@ -2361,7 +2410,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (mysql_query(conn, query) != 0) {
             fprintf(stderr, "MySQL Error (get dirs): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2369,7 +2418,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res) {
             fprintf(stderr, "MySQL Error (store dirs): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2400,7 +2449,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (mysql_query(conn, query) != 0) {
             fprintf(stderr, "MySQL Error (get files): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2408,7 +2457,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (!res) {
             fprintf(stderr, "MySQL Error (store files): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2433,8 +2482,7 @@ void process_command(int idx, const char *line, int line_len) {
                  strlen(content_data) > 0 ? " " : "",
                  content_data);
 
-        enqueue_send(idx, response, strlen(response));
-        printf("[LIST_FOLDER_CONTENT] Sent for dir_id=%d, parent=%d, group_id=%d\n", dir_id, parent_dir_id, group_id);
+        send_response(idx, response);
         return;
     }
 
@@ -2449,7 +2497,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (!token || !group_id_str || !parent_dir_id_str || !folder_name) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2458,7 +2506,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (group_id <= 0 || parent_dir_id < 0) {
             snprintf(response, sizeof(response), "400\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2467,7 +2515,7 @@ void process_command(int idx, const char *line, int line_len) {
         int user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (user_id <= 0) {
             snprintf(response, sizeof(response), "401\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2475,7 +2523,7 @@ void process_command(int idx, const char *line, int line_len) {
         int membership = user_in_group(user_id, group_id);
         if (membership != 1) {
             snprintf(response, sizeof(response), "403\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2487,7 +2535,7 @@ void process_command(int idx, const char *line, int line_len) {
 
             if (mysql_query(conn, query) != 0) {
                 snprintf(response, sizeof(response), "500\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
@@ -2495,7 +2543,7 @@ void process_command(int idx, const char *line, int line_len) {
             if (!res || mysql_num_rows(res) == 0) {
                 if (res) mysql_free_result(res);
                 snprintf(response, sizeof(response), "404\r\n");
-                enqueue_send(idx, response, strlen(response));
+                send_response(idx, response);
                 return;
             }
 
@@ -2510,7 +2558,7 @@ void process_command(int idx, const char *line, int line_len) {
         int dir_valid = dir_belongs_to_group(parent_dir_id, group_id);
         if (dir_valid != 1) {
             snprintf(response, sizeof(response), "404\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2522,21 +2570,21 @@ void process_command(int idx, const char *line, int line_len) {
 
         if (mysql_query(conn, query) != 0) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         MYSQL_RES *res = mysql_store_result(conn);
         if (!res) {
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
         if (mysql_num_rows(res) > 0) {
             mysql_free_result(res);
             snprintf(response, sizeof(response), "409\r\n"); // Conflict
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
         mysql_free_result(res);
@@ -2550,7 +2598,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (mysql_query(conn, query) != 0) {
             fprintf(stderr, "MySQL Error (create folder): %s\n", mysql_error(conn));
             snprintf(response, sizeof(response), "500\r\n");
-            enqueue_send(idx, response, strlen(response));
+            send_response(idx, response);
             return;
         }
 
@@ -2564,7 +2612,7 @@ void process_command(int idx, const char *line, int line_len) {
         mysql_query(conn, query);
 
         snprintf(response, sizeof(response), "200\r\n");
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         printf("[CREATE_FOLDER] Created folder '%s' with ID %d in parent_dir_id=%d\n",
                folder_name, new_dir_id, parent_dir_id);
         return;
@@ -2574,13 +2622,13 @@ void process_command(int idx, const char *line, int line_len) {
     // 8️⃣ UPLOAD_FILE token group_id dir_id file_name chunk_idx total_chunks payload
     // ============================
     if (strcasecmp(cmd, "UPLOAD_FILE") == 0) {
-        char *token = strtok(NULL, " \r\n");
-        char *group_id_str = strtok(NULL, " \r\n");
-        char *dir_id_str = strtok(NULL, " \r\n");
-        char *file_name_raw = strtok(NULL, " \r\n");
-        char *chunk_idx_str = strtok(NULL, " \r\n");
-        char *total_chunks_str = strtok(NULL, " \r\n");
-        char *base64_payload = strtok(NULL, "\r\n");
+        char *token = next_token(&ptr);
+        char *group_id_str = next_token(&ptr);
+        char *dir_id_str = next_token(&ptr);
+        char *file_name_raw = next_token(&ptr);
+        char *chunk_idx_str = next_token(&ptr);
+        char *total_chunks_str = next_token(&ptr);
+        char *base64_payload = next_token(&ptr);
 
         if (!token || !group_id_str || !dir_id_str || !file_name_raw ||
             !chunk_idx_str || !total_chunks_str || !base64_payload) {
@@ -2677,7 +2725,7 @@ void process_command(int idx, const char *line, int line_len) {
             snprintf(response, sizeof(response), "202 %d/%d\r\n", chunk_index, total_chunks);
         }
 
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -2685,9 +2733,9 @@ void process_command(int idx, const char *line, int line_len) {
     // 9️⃣ DOWNLOAD_FILE token file_id chunk_idx
     // ============================
     if (strcasecmp(cmd, "DOWNLOAD_FILE") == 0) {
-        char *token = strtok(NULL, " \r\n");
-        char *file_id_str = strtok(NULL, " \r\n");
-        char *chunk_idx_str = strtok(NULL, " \r\n");
+        char *token = next_token(&ptr);
+        char *file_id_str = next_token(&ptr);
+        char *chunk_idx_str = next_token(&ptr);
 
         if (!token || !file_id_str || !chunk_idx_str) {
             send_download_error(idx, "Thiếu tham số download");
@@ -2789,7 +2837,7 @@ void process_command(int idx, const char *line, int line_len) {
             snprintf(response, sizeof(response), "202 %d/%ld %s %s\r\n", chunk_index, total_chunks, file_name, base64_output);
         }
 
-        enqueue_send(idx, response, strlen(response));
+        send_response(idx, response);
         return;
     }
 
@@ -2797,5 +2845,5 @@ void process_command(int idx, const char *line, int line_len) {
     // ⓴ Command không tồn tại
     // ============================
     snprintf(response, sizeof(response), "ERR UNKNOWN_COMMAND %s\r\n", cmd);
-    enqueue_send(idx, response, strlen(response));
+    send_response(idx, response);
 }

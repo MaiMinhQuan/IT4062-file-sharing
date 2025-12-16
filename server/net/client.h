@@ -3,8 +3,8 @@
 
 #include <sys/socket.h>
 
-#define BUFFER_SIZE 4096
-#define SEND_BUFFER_SIZE 8192
+#define BUFFER_SIZE 24576
+#define SEND_BUFFER_SIZE 32768
 #define MAX_CLIENTS 30
 
 typedef struct {
@@ -17,6 +17,7 @@ typedef struct {
     int send_offset;
 
     int authenticated;
+    int user_id;
 } Client;
 
 extern Client clients[MAX_CLIENTS];

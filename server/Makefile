@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -g -I/opt/homebrew/opt/mysql/include -I/opt/homebrew/opt/openssl@3/include -I./database -I./auth -I./io -I./net -I./protocol
+CFLAGS = -Wall -g -I/opt/homebrew/opt/mysql/include -I/opt/homebrew/opt/openssl@3/include -I./database -I./auth -I./io -I./net -I./protocol -I./utils
 LDFLAGS = -L/opt/homebrew/opt/mysql/lib -L/opt/homebrew/opt/openssl@3/lib
 LIBS = -lmysqlclient -lssl -lcrypto
 
@@ -11,7 +11,8 @@ SERVER_SRCS = main.c \
               io/io_multiplexing.c \
               net/client.c \
               net/stream.c \
-              protocol/command.c
+              protocol/command.c \
+              utils/logger.c
 
 SERVER_OBJS = $(SERVER_SRCS:.c=.o)
 
@@ -31,6 +32,6 @@ client: $(CLIENT_OBJS)
 
 clean:
 	rm -f $(SERVER_OBJS) $(CLIENT_OBJS) server client
-	rm -f auth/*.o database/*.o io/*.o net/*.o protocol/*.o
+	rm -f auth/*.o database/*.o io/*.o net/*.o protocol/*.o utils/*.o
 
 .PHONY: clean all

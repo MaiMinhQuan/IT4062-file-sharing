@@ -103,8 +103,8 @@ int is_token_valid() {
         return 0;
     }
 
-    // Tạo kết nối mới (không dùng global_sock)
-    int sock = create_new_connection();
+    // Sử dụng connection hiện tại
+    int sock = connect_to_server();
     if (sock < 0) {
         return 0;
     }
@@ -117,7 +117,7 @@ int is_token_valid() {
     // Nhận response
     char response[BUFFER_SIZE] = {0};
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
-    close(sock);  // Đóng socket ngay sau khi nhận response
+    // KHÔNG đóng socket vì dùng chung global_sock
 
     if (bytes > 0) {
         response[bytes] = '\0';
@@ -209,7 +209,12 @@ int create_new_connection() {
 }
 
 int connect_to_server() {
-    // Luôn tạo kết nối mới để tránh vấn đề socket đã đóng
+    // Nếu đã có kết nối, trả về luôn
+    if (global_sock >= 0) {
+        return global_sock;
+    }
+
+    // Tạo kết nối mới
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");
@@ -233,6 +238,7 @@ int connect_to_server() {
         return -1;
     }
 
+    global_sock = sock;  // Lưu vào global_sock
     return sock;
 }
 
@@ -288,7 +294,7 @@ void handle_register() {
         }
     }
 
-    // Không đóng socket để giữ kết nối
+    // Connection được giữ mở trong global_sock để sử dụng cho các request tiếp theo
 }
 
 void handle_login() {
@@ -340,7 +346,7 @@ void handle_login() {
         }
     }
 
-    // Không đóng socket để giữ kết nối
+    // Connection được giữ mở trong global_sock để sử dụng cho các request tiếp theo
 }
 
 void handle_logout() {
@@ -378,6 +384,12 @@ void handle_logout() {
         } else {
             printf("✗ Đăng xuất thất bại!\n");
         }
+    }
+
+    // Đóng connection sau khi logout
+    if (global_sock >= 0) {
+        close(global_sock);
+        global_sock = -1;
     }
 }
 
@@ -641,8 +653,8 @@ void handle_list_groups() {
     printf("\n DANH SÁCH NHÓM CỦA BẠN (%d nhóm)\n\n", group_count);
 
     if (group_count == 0) {
-        printf("Bạn chưa tham gia nhóm nào.\n");
-        printf("Sử dụng chức năng 1 để tạo nhóm mới hoặc chức năng 3 để xin tham gia nhóm.\n");
+        printf("  Bạn chưa tham gia nhóm nào.\n");
+        printf("  Sử dụng chức năng 1 để tạo nhóm mới hoặc chức năng 3 để xin tham gia nhóm.\n");
         return;
     }
 
@@ -654,7 +666,7 @@ void handle_list_groups() {
         "└──────┴──────────────────────────────┴──────────┴─────────────────────┴──────────────────────────────┘\n";
 
     printf("%s", table_border);
-    printf("│ %-4s │ %-29s  │ %-10s│ %-23s│ %-30s  │\n",
+    printf("│ %-4s │ %-30s  │ %-9s│ %-22s│ %-31s  │\n",
         "ID", "Tên nhóm", "Vai trò", "Ngày tạo", "Mô tả");
     printf("%s", table_separator);
 
@@ -858,7 +870,7 @@ void handle_invite_user(int group_id) {
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
     response[bytes] = '\0';
@@ -870,7 +882,7 @@ void handle_invite_user(int group_id) {
     int invited_user_id = -1;
     if (sscanf(response, "%d %d", &status_code, &invited_user_id) < 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
 
@@ -882,13 +894,13 @@ void handle_invite_user(int group_id) {
         } else {
             printf("Lỗi không xác định (code: %d)\n", status_code);
         }
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
 
     if (invited_user_id <= 0) {
         printf("Không lấy được User ID!\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
 
@@ -902,7 +914,7 @@ void handle_invite_user(int group_id) {
     bytes = recv(sock, response, sizeof(response) - 1, 0);
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
     response[bytes] = '\0';
@@ -912,7 +924,7 @@ void handle_invite_user(int group_id) {
 
     if (sscanf(response, "%d", &status_code) != 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
 
@@ -946,7 +958,7 @@ void handle_invite_user(int group_id) {
             printf("Lỗi không xác định (code: %d)\n", status_code);
     }
 
-    close(sock);
+    // Connection kept open (using global_sock)
 }
 
 void handle_delete_item(int group_id) {
@@ -998,7 +1010,7 @@ void handle_delete_item(int group_id) {
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1010,7 +1022,7 @@ void handle_delete_item(int group_id) {
     int status_code;
     if (sscanf(response, "%d", &status_code) != 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1037,7 +1049,7 @@ void handle_delete_item(int group_id) {
             printf("Lỗi không xác định (code: %d)\n", status_code);
     }
 
-    close(sock);
+    // Connection kept open (using global_sock)
     global_sock = -1;
 }
 
@@ -1233,7 +1245,7 @@ void handle_create_folder(int group_id, int parent_dir_id) {
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
     response[bytes] = '\0';
@@ -1244,11 +1256,11 @@ void handle_create_folder(int group_id, int parent_dir_id) {
     int status_code = 0;
     if (sscanf(response, "%d", &status_code) < 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         return;
     }
 
-    close(sock);
+    // Connection kept open (using global_sock)
 
     switch (status_code) {
         case 200:
@@ -1318,7 +1330,7 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
         char *ptr = response;
         if (sscanf(ptr, "%d %d %d", &status_code, &current_dir_id, &parent_dir_id) < 2) {
             printf("Phản hồi không hợp lệ: %s\n", response);
-            close(sock);
+    // Connection kept open (using global_sock)
             return;
         }
 
@@ -1356,7 +1368,7 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
                 default:
                     printf("Lỗi không xác định (code: %d)\n", status_code);
             }
-            close(sock);
+    // Connection kept open (using global_sock)
             return;
         }
 
@@ -1427,8 +1439,7 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
         }
         free(temp);
 
-        // Đóng socket sau khi nhận xong response
-        close(sock);
+        // Connection kept open (using global_sock)
 
         // Hiển thị danh sách
         printf("\n┌───────────────────────────────────────────────────────────────────┐\n");
@@ -1523,6 +1534,9 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
         else if (strcasecmp(action, "U") == 0) {
             handle_upload_file(group_id);
         }
+        else if (strcasecmp(action, "D") == 0) {
+            handle_download_file(group_id);
+        }
         else if (strcasecmp(action, "N") == 0) {
             handle_create_folder(group_id, dir_id);
         }
@@ -1602,7 +1616,7 @@ void handle_rename_item(int group_id) {
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1614,7 +1628,7 @@ void handle_rename_item(int group_id) {
     int status_code;
     if (sscanf(response, "%d", &status_code) != 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1641,7 +1655,7 @@ void handle_rename_item(int group_id) {
             printf("Lỗi không xác định (code: %d)\n", status_code);
     }
 
-    close(sock);
+    // Connection kept open (using global_sock)
     global_sock = -1;
 }
 
@@ -1701,7 +1715,7 @@ void handle_move_item(int group_id) {
     int sent = send(sock, command, strlen(command), 0);
     if (sent <= 0) {
         printf("Không thể gửi lệnh đến server!\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1711,7 +1725,7 @@ void handle_move_item(int group_id) {
 
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1723,7 +1737,7 @@ void handle_move_item(int group_id) {
     int status_code;
     if (sscanf(response, "%d", &status_code) != 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1750,7 +1764,7 @@ void handle_move_item(int group_id) {
             printf("Lỗi không xác định (code: %d)\n", status_code);
     }
 
-    close(sock);
+    // Connection kept open (using global_sock)
     global_sock = -1;
 }
 
@@ -1812,7 +1826,7 @@ void handle_copy_item(int group_id) {
     int bytes = recv(sock, response, sizeof(response) - 1, 0);
     if (bytes <= 0) {
         printf("Không nhận được phản hồi từ server.\n");
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1824,7 +1838,7 @@ void handle_copy_item(int group_id) {
     int status_code;
     if (sscanf(response, "%d", &status_code) != 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
-        close(sock);
+    // Connection kept open (using global_sock)
         global_sock = -1;
         return;
     }
@@ -1851,7 +1865,7 @@ void handle_copy_item(int group_id) {
             printf("Lỗi không xác định (code: %d)\n", status_code);
     }
 
-    close(sock);
+    // Connection kept open (using global_sock)
     global_sock = -1;
 }
 
@@ -1896,8 +1910,8 @@ void handle_request_join_group() {
     printf("DANH SÁCH CÁC NHÓM CÓ THỂ THAM GIA (%d nhóm)\n", group_count);
 
     if (group_count == 0) {
-        printf("\nKhông có nhóm nào để tham gia.\n");
-        printf("Bạn đã là thành viên của tất cả các nhóm hoặc chưa có nhóm nào được tạo.\n");
+        printf("\n  Không có nhóm nào để tham gia.\n");
+        printf("  Bạn đã là thành viên của tất cả các nhóm hoặc chưa có nhóm nào được tạo.\n");
         return;
     }
 
@@ -2005,15 +2019,15 @@ void handle_request_join_group() {
         printf("\n");
         switch (status_code) {
             case 200:
-                printf("Gửi yêu cầu tham gia nhóm #%d thành công!\n", group_id);
-                printf("Yêu cầu của bạn đang chờ admin phê duyệt.\n");
+                printf(" Gửi yêu cầu tham gia nhóm #%d thành công!\n", group_id);
+                printf("  Yêu cầu của bạn đang chờ admin phê duyệt.\n");
                 break;
             case 409:
                 printf("✗ Bạn đã là thành viên của nhóm #%d rồi!\n", group_id);
                 break;
             case 423:
-                printf("Bạn đã gửi yêu cầu tham gia nhóm #%d trước đó.\n", group_id);
-                printf("Vui lòng chờ admin phê duyệt.\n");
+                printf("  Bạn đã gửi yêu cầu tham gia nhóm #%d trước đó.\n", group_id);
+                printf("ℹ  Vui lòng chờ admin phê duyệt.\n");
                 break;
             case 404:
                 printf("Nhóm với ID %d không tồn tại!\n", group_id);
@@ -2425,16 +2439,16 @@ void handle_view_my_invitations() {
             response[len-2] = '\0';
         }
 
-        // Parse response: "200 LIST_RECEIVED_INVITATIONS [invitation_1] [invitation_2] ..."
+        // Parse response: "200 [invitation_1] [invitation_2] ..."
         int status_code = 0;
         char cmd_name[50];
         char invitations_data[BUFFER_SIZE] = {0};
 
         // Parse ít nhất status_code và cmd_name
-        int parsed = sscanf(response, "%d %s %[^\n]", &status_code, cmd_name, invitations_data);
-        if (parsed < 2) {
+        int parsed = sscanf(response, "%d %[^\n]", &status_code, invitations_data);
+        if (parsed < 1) {
             printf("Phản hồi không hợp lệ từ server.\n");
-            printf("Debug: response = '%s'\n", response);
+            printf("Debug: response = \n", response);
             return;
         }
 
