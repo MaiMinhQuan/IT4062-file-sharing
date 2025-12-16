@@ -1085,10 +1085,9 @@ void handle_list_members(int group_id) {
     if (crlf) *crlf = '\0';
 
     int status_code = 0;
-    char command_name[64];
 
-    // Response format: "200 LIST_GROUP_MEMBERS user_id||username<SPACE>... group_id\r\n"
-    if (sscanf(response, "%d %s", &status_code, command_name) < 1) {
+    // Response format: "200 username||role<SPACE>... group_id\r\n"
+    if (sscanf(response, "%d", &status_code) < 1) {
         printf("Phản hồi không hợp lệ: %s\n", response);
         return;
     }
@@ -1117,13 +1116,13 @@ void handle_list_members(int group_id) {
     }
 
     // Parse members data
-    // Format: "200 LIST_GROUP_MEMBERS user_id||username user_id||username ... group_id"
-    char *members_start = strstr(response, "LIST_GROUP_MEMBERS");
+    // Format: "200 username||role username||role ... group_id"
+    char *members_start = strchr(response, ' ');
     if (!members_start) {
         printf("Không tìm thấy dữ liệu thành viên.\n");
         return;
     }
-    members_start += strlen("LIST_GROUP_MEMBERS") + 1;
+    members_start++; // Skip the space after status code
 
     // Đếm số thành viên
     int member_count = 0;
@@ -1191,7 +1190,6 @@ void handle_list_members(int group_id) {
     free(temp);
 
     printf("%s", table_bottom);
-    printf("\nXem thành viên thành công!\n");
 }
 
 void handle_create_folder(int group_id, int parent_dir_id) {
