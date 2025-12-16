@@ -671,7 +671,7 @@ void handle_list_groups() {
 
     while (*list_start && group_index < 100) {
         char *next_line = strstr(list_start, "\r\n");
-        
+
         // Tính độ dài của dòng hiện tại
         size_t line_len;
         if (next_line) {
@@ -757,7 +757,7 @@ void handle_list_groups() {
             break;
         }
     }
-    
+
 
     // Gọi hàm truy cập nhóm với role
     handle_group_access(selected_group_id, user_role);
@@ -2419,9 +2419,11 @@ void handle_view_my_invitations() {
         }
         response[bytes] = '\0';
 
-        // Remove trailing CRLF
-        char *crlf = strstr(response, "\r\n");
-        if (crlf) *crlf = '\0';
+        // Remove trailing CRLF at the end (not the first one)
+        size_t len = strlen(response);
+        if (len >= 2 && response[len-2] == '\r' && response[len-1] == '\n') {
+            response[len-2] = '\0';
+        }
 
         // Parse response: "200 LIST_RECEIVED_INVITATIONS [invitation_1] [invitation_2] ..."
         int status_code = 0;
@@ -2446,7 +2448,6 @@ void handle_view_my_invitations() {
             return;
         }
 
-        // Check if there are invitations
         if (strlen(invitations_data) == 0 || strstr(invitations_data, "[invitation_") == NULL) {
             printf("\nBạn không có lời mời nào đang chờ xử lý.\n");
             return;
@@ -2471,14 +2472,65 @@ void handle_view_my_invitations() {
             if (!colon) break;
 
             // Parse: group_id group_name request_id request_status
-            int group_id, request_id;
-            char group_name[256], status[32];
+            // Copy data để parse (vì sẽ modify chuỗi)
+            char line_buf[512];
+            char *data = colon + 1;
+            while (*data == ' ') data++; // Skip leading spaces
 
-            if (sscanf(colon + 1, "%d %255s %d %31s", &group_id, group_name, &request_id, status) == 4) {
-                printf("│ %-10d │ %-8d │ %-29.29s │ %-12s │\n",
-                       request_id, group_id, group_name, status);
-                invitation_count++;
+            strncpy(line_buf, data, sizeof(line_buf) - 1);
+            line_buf[sizeof(line_buf) - 1] = '\0';
+
+            // Loại bỏ khoảng trắng/newline ở cuối
+            size_t len = strlen(line_buf);
+            while (len > 0 && (line_buf[len-1] == ' ' || line_buf[len-1] == '\n' ||
+                              line_buf[len-1] == '\r' || line_buf[len-1] == '\t')) {
+                line_buf[--len] = '\0';
             }
+
+            if (len == 0) {
+                ptr = colon + 1;
+                while (*ptr && *ptr != '[') ptr++;
+                continue;
+            }
+
+            // Bây giờ parse: "6 code java 7 pending"
+            // Tìm status (từ cuối cùng)
+            char *last_space = strrchr(line_buf, ' ');
+            if (!last_space) {
+                ptr = colon + 1;
+                while (*ptr && *ptr != '[') ptr++;
+                continue;
+            }
+
+            char status[32];
+            strncpy(status, last_space + 1, sizeof(status) - 1);
+            status[sizeof(status) - 1] = '\0';
+            *last_space = '\0'; // Cắt chuỗi: "6 code java 7"
+
+            // Tìm request_id (từ cuối cùng của chuỗi còn lại)
+            char *second_last_space = strrchr(line_buf, ' ');
+            if (!second_last_space) {
+                ptr = colon + 1;
+                while (*ptr && *ptr != '[') ptr++;
+                continue;
+            }
+
+            int request_id = atoi(second_last_space + 1);
+            *second_last_space = '\0'; // Cắt chuỗi: "6 code java"
+
+            // Parse group_id (số đầu tiên)
+            int group_id = atoi(line_buf);
+
+            // Group name là phần còn lại sau group_id
+            char *group_name_start = line_buf;
+            while (*group_name_start && isdigit(*group_name_start)) {
+                group_name_start++;
+            }
+            while (*group_name_start == ' ') group_name_start++;
+
+            printf("│ %-10d │ %-8d │ %-29.29s │ %-12s │\n",
+                   request_id, group_id, group_name_start, status);
+            invitation_count++;
 
             // Move to next invitation
             ptr = colon + 1;
