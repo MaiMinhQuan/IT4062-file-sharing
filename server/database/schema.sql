@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
     user_id INT NOT NULL,
     group_id INT NOT NULL,
     role ENUM('member', 'admin') NOT NULL DEFAULT 'member',
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, group_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id),
@@ -132,8 +133,8 @@ BEGIN
     SET root_dir_id = new_dir_id
     WHERE group_id = new_group_id;
 
-    INSERT INTO user_groups (user_id, group_id, role, joined_at)
-    VALUES (p_user_id, new_group_id, 'admin', NOW());
+    INSERT INTO user_groups (user_id, group_id, role, is_deleted, joined_at)
+    VALUES (p_user_id, new_group_id, 'admin', FALSE, NOW());
 
     SELECT new_group_id AS group_id;
 END$$
@@ -151,7 +152,7 @@ BEGIN
         COALESCE(g.description, '') AS description
     FROM `groups` g
     JOIN user_groups ug ON g.group_id = ug.group_id
-    WHERE ug.user_id = p_user_id
+    WHERE ug.user_id = p_user_id AND ug.is_deleted = FALSE
     ORDER BY g.created_at DESC;
 END$$
 
@@ -179,7 +180,7 @@ request_join_group: BEGIN
     -- Kiểm tra đã là thành viên chưa
     SELECT COUNT(*) INTO already_member
     FROM user_groups
-    WHERE user_id = p_user_id AND group_id = p_group_id;
+    WHERE user_id = p_user_id AND group_id = p_group_id AND is_deleted = FALSE;
 
     IF already_member > 0 THEN
         SET result_code = 409; -- Đã là thành viên của nhóm
@@ -230,7 +231,7 @@ check_admin: BEGIN
     -- Kiểm tra user có phải là thành viên không
     SELECT COUNT(*) INTO is_member
     FROM user_groups
-    WHERE user_id = p_user_id AND group_id = p_group_id;
+    WHERE user_id = p_user_id AND group_id = p_group_id AND is_deleted = FALSE;
 
     IF is_member = 0 THEN
         SET result_code = 403; -- User chỉ là thành viên (không phải admin)
@@ -240,7 +241,7 @@ check_admin: BEGIN
     -- Kiểm tra user có phải là admin không
     SELECT COUNT(*) INTO is_admin
     FROM user_groups
-    WHERE user_id = p_user_id AND group_id = p_group_id AND role = 'admin';
+    WHERE user_id = p_user_id AND group_id = p_group_id AND role = 'admin' AND is_deleted = FALSE;
 
     IF is_admin > 0 THEN
         SET result_code = 200; -- User là admin của nhóm
@@ -282,7 +283,7 @@ handle_join_request: BEGIN
     -- Kiểm tra người xử lý có quyền admin không
     SELECT COUNT(*) INTO is_admin
     FROM user_groups
-    WHERE user_id = p_admin_user_id AND group_id = req_group_id AND role = 'admin';
+    WHERE user_id = p_admin_user_id AND group_id = req_group_id AND role = 'admin' AND is_deleted = FALSE;
 
     IF is_admin = 0 THEN
         SET result_code = 403; -- Người dùng không có quyền xét duyệt
@@ -302,9 +303,10 @@ handle_join_request: BEGIN
         SET status = 'accepted', updated_at = NOW()
         WHERE request_id = p_request_id;
 
-        -- Thêm user vào nhóm
-        INSERT INTO user_groups (user_id, group_id, role, joined_at)
-        VALUES (req_user_id, req_group_id, 'member', NOW());
+        -- Thêm user vào nhóm (revive nếu trước đó bị xóa mềm)
+        INSERT INTO user_groups (user_id, group_id, role, is_deleted, joined_at)
+        VALUES (req_user_id, req_group_id, 'member', FALSE, NOW())
+        ON DUPLICATE KEY UPDATE role = 'member', is_deleted = FALSE, joined_at = NOW();
 
         SET result_code = 200; -- Xử lý yêu cầu thành công
     ELSEIF p_option = 'rejected' THEN
@@ -333,7 +335,7 @@ BEGIN
     FROM `groups` g
     JOIN users u ON g.created_by = u.user_id
     WHERE g.group_id NOT IN (
-        SELECT group_id FROM user_groups WHERE user_id = p_user_id
+        SELECT group_id FROM user_groups WHERE user_id = p_user_id AND is_deleted = FALSE
     )
     ORDER BY g.created_at DESC;
 END$$
@@ -356,7 +358,7 @@ BEGIN
     WHERE gr.request_type = 'join_request'
       AND gr.status = 'pending'
       AND gr.group_id IN (
-          SELECT group_id FROM user_groups WHERE user_id = p_admin_user_id AND role = 'admin'
+          SELECT group_id FROM user_groups WHERE user_id = p_admin_user_id AND role = 'admin' AND is_deleted = FALSE
       )
     ORDER BY g.group_id, gr.created_at ASC;
 END$$
