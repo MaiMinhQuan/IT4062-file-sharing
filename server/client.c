@@ -900,8 +900,8 @@ void handle_remove_user_from_group(int group_id) {
         return;
     }
 
-    // Remove user from group (soft delete)
-    snprintf(command, sizeof(command), "REMOVE_USER_FROM_GROUP %s %d %d\r\n",
+    // Remove member from group (soft delete)
+    snprintf(command, sizeof(command), "REMOVE_MEMBER %s %d %d\r\n",
              current_token, group_id, target_user_id);
     send(sock, command, strlen(command), 0);
 
@@ -925,20 +925,14 @@ void handle_remove_user_from_group(int group_id) {
         case 200:
             printf("✓ Đã xóa '%s' khỏi nhóm %d.\n", username, group_id);
             break;
-        case 401:
-            printf("✗ Token không hợp lệ. Vui lòng đăng nhập lại.\n");
-            break;
         case 403:
-            printf("✗ Bạn không có quyền xóa user này (hoặc user là admin).\n");
+            printf("✗ Không có quyền xóa (hoặc token không hợp lệ / user là admin).\n");
             break;
         case 404:
-            printf("✗ User không thuộc nhóm hoặc đã bị xóa trước đó.\n");
+            printf("✗ Không tìm thấy nhóm hoặc user (hoặc user không thuộc nhóm).\n");
             break;
-        case 409:
-            printf("✗ User đã bị xóa khỏi nhóm trước đó.\n");
-            break;
-        case 400:
-            printf("✗ Dữ liệu gửi lên không hợp lệ.\n");
+        case 500:
+            printf("✗ Lỗi server.\n");
             break;
         default:
             printf("✗ Lỗi server (code=%d).\n", status_code);

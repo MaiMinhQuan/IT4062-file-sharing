@@ -2313,16 +2313,21 @@ void process_command(int idx, const char *line, int line_len) {
     }
 
     // ============================
-    // REMOVE_USER_FROM_GROUP token group_id user_id
+    // REMOVE_MEMBER token group_id user_id
     // Only admin can remove; removal is soft delete (user_groups.is_deleted = 1)
+    // Response codes:
+    // 200: success
+    // 403: no permission / invalid token / cannot remove admin
+    // 404: group not found / user not found / target not in group
+    // 500: server error
     // ============================
-    if (strcasecmp(cmd, "REMOVE_USER_FROM_GROUP") == 0) {
+    if (strcasecmp(cmd, "REMOVE_MEMBER") == 0) {
         char *token = next_token(&ptr);
         char *group_id_str = next_token(&ptr);
         char *target_user_id_str = next_token(&ptr);
 
         if (!token || !group_id_str || !target_user_id_str) {
-            snprintf(response, sizeof(response), "400\r\n");
+            snprintf(response, sizeof(response), "404\r\n");
             send_response(idx, response);
             return;
         }
@@ -2330,7 +2335,7 @@ void process_command(int idx, const char *line, int line_len) {
         int group_id = atoi(group_id_str);
         int target_user_id = atoi(target_user_id_str);
         if (group_id <= 0 || target_user_id <= 0) {
-            snprintf(response, sizeof(response), "400\r\n");
+            snprintf(response, sizeof(response), "404\r\n");
             send_response(idx, response);
             return;
         }
@@ -2339,10 +2344,59 @@ void process_command(int idx, const char *line, int line_len) {
         char error_msg[256];
         int admin_user_id = verify_token(token, error_msg, sizeof(error_msg));
         if (admin_user_id <= 0) {
-            snprintf(response, sizeof(response), "401\r\n");
+            snprintf(response, sizeof(response), "403\r\n");
             send_response(idx, response);
             return;
         }
+
+        // Check if group exists
+        char query[512];
+        snprintf(query, sizeof(query),
+                 "SELECT 1 FROM `groups` WHERE group_id=%d LIMIT 1",
+                 group_id);
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+        if (mysql_num_rows(res) == 0) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+        mysql_free_result(res);
+
+        // Check if target user exists
+        snprintf(query, sizeof(query),
+                 "SELECT 1 FROM users WHERE user_id=%d LIMIT 1",
+                 target_user_id);
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        res = mysql_store_result(conn);
+        if (!res) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+        if (mysql_num_rows(res) == 0) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+        mysql_free_result(res);
 
         // Admin must be active admin of the group
         int is_admin = is_user_admin_of_group(admin_user_id, group_id);
@@ -2358,7 +2412,6 @@ void process_command(int idx, const char *line, int line_len) {
         }
 
         // Target must be an active member (not deleted)
-        char query[512];
         snprintf(query, sizeof(query),
                  "SELECT role FROM user_groups WHERE user_id=%d AND group_id=%d AND is_deleted=0",
                  target_user_id, group_id);
@@ -2368,7 +2421,7 @@ void process_command(int idx, const char *line, int line_len) {
             return;
         }
 
-        MYSQL_RES *res = mysql_store_result(conn);
+        res = mysql_store_result(conn);
         if (!res) {
             snprintf(response, sizeof(response), "500\r\n");
             send_response(idx, response);
@@ -2404,7 +2457,7 @@ void process_command(int idx, const char *line, int line_len) {
         }
 
         if ((int)mysql_affected_rows(conn) == 0) {
-            snprintf(response, sizeof(response), "409\r\n");
+            snprintf(response, sizeof(response), "404\r\n");
             send_response(idx, response);
             return;
         }
