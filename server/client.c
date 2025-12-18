@@ -39,6 +39,7 @@ void handle_list_groups();
 void handle_group_access(int group_id, const char *user_role);
 void handle_invite_user(int group_id);
 void handle_remove_user_from_group(int group_id);
+int handle_leave_group(int group_id);
 void handle_request_join_group();
 void handle_view_pending_requests();
 void handle_approve_request();
@@ -792,9 +793,14 @@ void handle_group_access(int group_id, const char *user_role) {
         printf("│ 1. Quản lý File/Folder                  │\n");
         printf("│ 2. Xem thành viên nhóm                  │\n");
 
+        if (!is_admin) {
+            printf("│ 3. Rời nhóm                             │\n");
+        }
+
         if (is_admin) {
             printf("│ 3. Mời user vào nhóm (Admin)            │\n");
             printf("│ 4. Xóa user khỏi nhóm (Admin)           │\n");
+            printf("│ 5. Rời nhóm                             │\n");
         }
 
         printf("│ 0. Quay lại                             │\n");
@@ -820,7 +826,9 @@ void handle_group_access(int group_id, const char *user_role) {
                 if (is_admin) {
                     handle_invite_user(group_id);
                 } else {
-                    printf("Lựa chọn không hợp lệ!\n");
+                    if (handle_leave_group(group_id)) {
+                        return;
+                    }
                 }
                 break;
             case 4:
@@ -830,17 +838,95 @@ void handle_group_access(int group_id, const char *user_role) {
                     printf("Lựa chọn không hợp lệ!\n");
                 }
                 break;
+            case 5:
+                if (is_admin) {
+                    if (handle_leave_group(group_id)) {
+                        return;
+                    }
+                } else {
+                    printf("Lựa chọn không hợp lệ!\n");
+                }
+                break;
             case 0:
                 printf("Quay lại menu chính...\n");
                 return;
             default:
                 if (is_admin) {
-                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-4.\n");
+                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-5.\n");
                 } else {
-                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-2.\n");
+                    printf("Lựa chọn không hợp lệ! Vui lòng chọn từ 0-3.\n");
                 }
         }
     }
+}
+
+int handle_leave_group(int group_id) {
+    if (!is_token_valid()) {
+        printf("Bạn cần đăng nhập để rời nhóm!\n");
+        return 0;
+    }
+
+    printf("\n┌────────────────────────────────────────────┐\n");
+    printf("│                 RỜI NHÓM                   │\n");
+    printf("└────────────────────────────────────────────┘\n");
+
+    printf("Bạn có chắc chắn muốn rời nhóm #%d? (y/n): ", group_id);
+    char confirm[8] = {0};
+    if (!fgets(confirm, sizeof(confirm), stdin)) {
+        printf("Không đọc được lựa chọn.\n");
+        return 0;
+    }
+
+    // Skip leading spaces
+    char *p = confirm;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != 'y' && *p != 'Y') {
+        printf("Đã hủy rời nhóm.\n");
+        return 0;
+    }
+
+    int sock = connect_to_server();
+    if (sock < 0) {
+        printf("Không thể kết nối đến server!\n");
+        return 0;
+    }
+
+    char command[BUFFER_SIZE];
+    snprintf(command, sizeof(command), "LEAVE_GROUP %s %d\r\n", current_token, group_id);
+    send(sock, command, strlen(command), 0);
+
+    char response[BUFFER_SIZE] = {0};
+    int bytes = recv(sock, response, sizeof(response) - 1, 0);
+    if (bytes <= 0) {
+        printf("Không nhận được phản hồi từ server.\n");
+        return 0;
+    }
+
+    response[bytes] = '\0';
+    char *crlf = strstr(response, "\r\n");
+    if (crlf) *crlf = '\0';
+
+    int status_code = 0;
+    sscanf(response, "%d", &status_code);
+
+    if (status_code == 200) {
+        printf("✓ Rời nhóm thành công!\n");
+        printf("Quay lại menu chính...\n");
+        return 1;
+    }
+
+    if (status_code == 404) {
+        printf("✗ Rời nhóm thất bại (có thể bạn không phải member hoặc là admin).\n");
+        return 0;
+    }
+
+    if (status_code == 500) {
+        printf("✗ Lỗi server (500).\n");
+        return 0;
+    }
+
+    printf("✗ Phản hồi không hợp lệ từ server: %s\n", response);
+    return 0;
 }
 
 void handle_remove_user_from_group(int group_id) {

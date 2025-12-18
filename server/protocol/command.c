@@ -2468,6 +2468,122 @@ void process_command(int idx, const char *line, int line_len) {
     }
 
     // ============================
+    // LEAVE_GROUP token group_id
+    // Member leaves a group: soft delete (user_groups.is_deleted = 1)
+    // Admin cannot leave group.
+    // Response codes (per spec):
+    // 200: success
+    // 404: leave failed (invalid token / group not found / not a member / admin cannot leave)
+    // 500: server error
+    // ============================
+    if (strcasecmp(cmd, "LEAVE_GROUP") == 0) {
+        char *token = next_token(&ptr);
+        char *group_id_str = next_token(&ptr);
+
+        if (!token || !group_id_str) {
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        int group_id = atoi(group_id_str);
+        if (group_id <= 0) {
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        // Verify token
+        char error_msg[256];
+        int user_id = verify_token(token, error_msg, sizeof(error_msg));
+        if (user_id <= 0) {
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        // Check if group exists
+        char query[512];
+        snprintf(query, sizeof(query),
+                 "SELECT 1 FROM `groups` WHERE group_id=%d LIMIT 1",
+                 group_id);
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (!res) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+        if (mysql_num_rows(res) == 0) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+        mysql_free_result(res);
+
+        // Check membership + role
+        snprintf(query, sizeof(query),
+                 "SELECT role FROM user_groups WHERE user_id=%d AND group_id=%d AND is_deleted=0",
+                 user_id, group_id);
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        res = mysql_store_result(conn);
+        if (!res) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(res);
+        if (!row) {
+            mysql_free_result(res);
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        const char *role = row[0];
+        if (role && strcmp(role, "admin") == 0) {
+            mysql_free_result(res);
+            // Admin cannot leave group
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+        mysql_free_result(res);
+
+        // Soft delete membership
+        snprintf(query, sizeof(query),
+                 "UPDATE user_groups SET is_deleted=1 WHERE user_id=%d AND group_id=%d AND is_deleted=0",
+                 user_id, group_id);
+        if (mysql_query(conn, query) != 0) {
+            snprintf(response, sizeof(response), "500\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        if ((int)mysql_affected_rows(conn) == 0) {
+            snprintf(response, sizeof(response), "404\r\n");
+            send_response(idx, response);
+            return;
+        }
+
+        snprintf(response, sizeof(response), "200\r\n");
+        send_response(idx, response);
+        return;
+    }
+
+    // ============================
     // LIST_FOLDER_CONTENT token group_id dir_id
     // ============================
     if (strcasecmp(cmd, "LIST_FOLDER_CONTENT") == 0) {
