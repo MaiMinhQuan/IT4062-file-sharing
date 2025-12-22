@@ -1,6 +1,9 @@
 #include "command.h"
 #include "../net/stream.h"
 #include "../net/client.h"
+
+// Function declarations
+static void process_copy_item(char *token, char *item_id_str, char *target_dir_id_str, char *type, int idx);
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>     // for strcasecmp
@@ -17,8 +20,6 @@
 #include "../database/db.h"
 #include "../utils/logger.h"
 #include <mysql/mysql.h>
-
-#define BUFFER_SIZE 4096
 #define MAX_CONCURRENT_UPLOADS 3
 
 // Rate limiting: Track active uploads globally
@@ -1527,15 +1528,12 @@ void process_command(int idx, const char *line, int line_len) {
             send_response(idx, response);
             return;
         }
-
         MYSQL_RES *res = mysql_store_result(conn);
         if (!res) {
             snprintf(response, sizeof(response), "500\r\n");
             send_response(idx, response);
             return;
         }
-
-        int num_invitations = mysql_num_rows(res);
 
         // Build invitation list in format: [invitation_n]: group_id group_name request_id request_status
         char invitations_str[BUFFER_SIZE];
@@ -1963,7 +1961,7 @@ void process_command(int idx, const char *line, int line_len) {
 
         // Get group_id of the item
         int item_group_id = -1;
-        char query[512];
+        char query[1024];
 
         if (strcasecmp(type, "F") == 0) {
             snprintf(query, sizeof(query),
@@ -2057,7 +2055,6 @@ void process_command(int idx, const char *line, int line_len) {
         send_response(idx, response);
         return;
     }
-
     // ============================
     // ⓳ COPY_ITEM token item_id target_dir_id type
     // ============================
@@ -2175,31 +2172,330 @@ void process_command(int idx, const char *line, int line_len) {
 
         // Copy the item
         if (strcasecmp(type, "F") == 0) {
-            // Copy single file - duplicate record in database
+            // Get source file details
             snprintf(query, sizeof(query),
-                     "INSERT INTO files (file_name, file_path, file_size, file_type, dir_id, group_id, uploaded_by) "
-                     "SELECT file_name, file_path, file_size, file_type, %d, group_id, %d "
-                     "FROM files WHERE file_id=%d",
-                     target_dir_id, user_id, item_id);
+                     "SELECT file_name, file_path, file_size, file_type, group_id "
+                     "FROM files WHERE file_id=%d AND is_deleted=0", item_id);
+            
             if (mysql_query(conn, query) != 0) {
                 snprintf(response, sizeof(response), "500\r\n");
                 send_response(idx, response);
                 return;
             }
-        } else {
-            // Copy directory recursively (all files and subdirectories)
-            if (copy_directory_recursive(item_id, target_dir_id, user_id) < 0) {
+
+            MYSQL_RES *file_res = mysql_store_result(conn);
+            if (!file_res || mysql_num_rows(file_res) == 0) {
+                if (file_res) mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "404\r\n");
+                send_response(idx, response);
+                return;
+            }
+
+            MYSQL_ROW file_row = mysql_fetch_row(file_res);
+            char *file_name = file_row[0];
+            char *file_path = file_row[1];
+            long file_size = atol(file_row[2]);
+            char *file_type = file_row[3];
+            int file_group_id = atoi(file_row[4]);
+
+            // Sanitize filename
+            char safe_filename[MAX_FILENAME_LEN];
+            sanitize_filename(file_name, safe_filename, sizeof(safe_filename));
+
+            // Prepare target directory path
+            char target_dir_path[PATH_MAX];
+            if (prepare_storage_directory(file_group_id, target_dir_id, target_dir_path, sizeof(target_dir_path)) != 0) {
+                mysql_free_result(file_res);
                 snprintf(response, sizeof(response), "500\r\n");
                 send_response(idx, response);
                 return;
             }
+
+            // Create new file path in target directory
+            char new_file_path[PATH_MAX];
+            int written = snprintf(new_file_path, sizeof(new_file_path), "%s/%s", target_dir_path, safe_filename);
+            if (written <= 0 || written >= (int)sizeof(new_file_path)) {
+                mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+
+            // Copy physical file
+            FILE *src = fopen(file_path, "rb");
+            if (!src) {
+                mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+
+            FILE *dst = fopen(new_file_path, "wb");
+            if (!dst) {
+                fclose(src);
+                mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+
+            char buffer[8192];
+            size_t bytes_read;
+            int copy_success = 1;
+            
+            while ((bytes_read = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+                if (fwrite(buffer, 1, bytes_read, dst) != bytes_read) {
+                    copy_success = 0;
+                    break;
+                }
+            }
+
+            fclose(src);
+            fclose(dst);
+
+            if (!copy_success) {
+                remove(new_file_path);
+                mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+
+            // Get actual file size of copied file
+            long new_file_size = get_file_size(new_file_path);
+            if (new_file_size < 0) {
+                remove(new_file_path);
+                mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+
+            // Insert file metadata into database
+            if (insert_file_metadata(safe_filename, new_file_path, new_file_size,
+                                     file_group_id, target_dir_id, user_id) != 0) {
+                remove(new_file_path);
+                mysql_free_result(file_res);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+            
+            mysql_free_result(file_res);
+            
+        } else {
+            // Copy directory recursively
+            // First get source directory details
+            char dir_query[1024];
+            snprintf(dir_query, sizeof(dir_query),
+                    "SELECT dir_name, group_id FROM directories WHERE dir_id=%d AND is_deleted=0",
+                    item_id);
+                    
+            if (mysql_query(conn, dir_query) != 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+            
+            MYSQL_RES *dir_res = mysql_store_result(conn);
+            if (!dir_res || mysql_num_rows(dir_res) == 0) {
+                if (dir_res) mysql_free_result(dir_res);
+                snprintf(response, sizeof(response), "404\r\n");
+                send_response(idx, response);
+                return;
+            }
+            
+            MYSQL_ROW dir_row = mysql_fetch_row(dir_res);
+            char *dir_name = dir_row[0];
+            int dir_group_id = atoi(dir_row[1]);
+            
+            // Create target directory in database
+            snprintf(dir_query, sizeof(dir_query),
+                    "INSERT INTO directories (dir_name, parent_dir_id, group_id, created_by) "
+                    "VALUES ('%s', %d, %d, %d)",
+                    dir_name, target_dir_id, dir_group_id, user_id);
+            
+            mysql_free_result(dir_res);
+                    
+            if (mysql_query(conn, dir_query) != 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+            
+            int new_dir_id = mysql_insert_id(conn);
+            
+            // Prepare physical directory
+            char new_dir_path[PATH_MAX];
+            if (prepare_storage_directory(dir_group_id, new_dir_id, new_dir_path, sizeof(new_dir_path)) != 0) {
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+            
+            // Create work queues for BFS traversal
+            int *src_dir_queue = malloc(sizeof(int) * 1000);
+            int *dst_dir_queue = malloc(sizeof(int) * 1000);
+            int *next_src_queue = malloc(sizeof(int) * 1000);
+            int *next_dst_queue = malloc(sizeof(int) * 1000);
+            
+            if (!src_dir_queue || !dst_dir_queue || !next_src_queue || !next_dst_queue) {
+                free(src_dir_queue);
+                free(dst_dir_queue);
+                free(next_src_queue);
+                free(next_dst_queue);
+                snprintf(response, sizeof(response), "500\r\n");
+                send_response(idx, response);
+                return;
+            }
+            
+            int queue_size = 1;
+            src_dir_queue[0] = item_id;
+            dst_dir_queue[0] = new_dir_id;
+            
+            // Process directories level by level
+            while (queue_size > 0) {
+                int next_queue_size = 0;
+                
+                for (int i = 0; i < queue_size; i++) {
+                    int current_src_dir = src_dir_queue[i];
+                    int current_dst_dir = dst_dir_queue[i];
+                    
+                    // Get destination directory path
+                    char dst_dir_path[PATH_MAX];
+                    if (prepare_storage_directory(dir_group_id, current_dst_dir, dst_dir_path, sizeof(dst_dir_path)) != 0) {
+                        continue;
+                    }
+                    
+                    // Copy all files in current directory
+                    snprintf(dir_query, sizeof(dir_query),
+                            "SELECT file_id, file_name, file_path, file_size, file_type "
+                            "FROM files WHERE dir_id=%d AND is_deleted=0", current_src_dir);
+                            
+                    if (mysql_query(conn, dir_query) == 0) {
+                        MYSQL_RES *file_res = mysql_store_result(conn);
+                        if (file_res) {
+                            MYSQL_ROW file_row;
+                            while ((file_row = mysql_fetch_row(file_res))) {
+                                char *src_file_name = file_row[1];
+                                char *src_file_path = file_row[2];
+                                long src_file_size = atol(file_row[3]);
+                                char *src_file_type = file_row[4];
+                                
+                                // Sanitize filename
+                                char safe_filename[MAX_FILENAME_LEN];
+                                sanitize_filename(src_file_name, safe_filename, sizeof(safe_filename));
+                                
+                                // Create destination file path
+                                char dst_file_path[PATH_MAX];
+                                int written = snprintf(dst_file_path, sizeof(dst_file_path), 
+                                                      "%s/%s", dst_dir_path, safe_filename);
+                                if (written <= 0 || written >= (int)sizeof(dst_file_path)) {
+                                    continue;
+                                }
+                                
+                                // Copy physical file
+                                FILE *src = fopen(src_file_path, "rb");
+                                if (src) {
+                                    FILE *dst = fopen(dst_file_path, "wb");
+                                    if (dst) {
+                                        char buffer[8192];
+                                        size_t bytes_read;
+                                        int copy_success = 1;
+                                        
+                                        while ((bytes_read = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+                                            if (fwrite(buffer, 1, bytes_read, dst) != bytes_read) {
+                                                copy_success = 0;
+                                                break;
+                                            }
+                                        }
+                                        
+                                        fclose(dst);
+                                        
+                                        if (copy_success) {
+                                            // Get actual size of copied file
+                                            long new_size = get_file_size(dst_file_path);
+                                            if (new_size >= 0) {
+                                                // Insert file metadata
+                                                insert_file_metadata(safe_filename, dst_file_path, new_size,
+                                                                   dir_group_id, current_dst_dir, user_id);
+                                            } else {
+                                                remove(dst_file_path);
+                                            }
+                                        } else {
+                                            remove(dst_file_path);
+                                        }
+                                    }
+                                    fclose(src);
+                                }
+                            }
+                            mysql_free_result(file_res);
+                        }
+                    }
+                    
+                    // Get subdirectories for next level
+                    snprintf(dir_query, sizeof(dir_query),
+                            "SELECT dir_id, dir_name FROM directories "
+                            "WHERE parent_dir_id=%d AND is_deleted=0", current_src_dir);
+                            
+                    if (mysql_query(conn, dir_query) == 0) {
+                        MYSQL_RES *subdir_res = mysql_store_result(conn);
+                        if (subdir_res) {
+                            MYSQL_ROW subdir_row;
+                            while ((subdir_row = mysql_fetch_row(subdir_res))) {
+                                int subdir_id = atoi(subdir_row[0]);
+                                char *subdir_name = subdir_row[1];
+                                
+                                // Create new subdirectory in database
+                                char new_dir_query[1024];
+                                snprintf(new_dir_query, sizeof(new_dir_query),
+                                        "INSERT INTO directories (dir_name, parent_dir_id, group_id, created_by) "
+                                        "VALUES ('%s', %d, %d, %d)",
+                                        subdir_name, current_dst_dir, dir_group_id, user_id);
+                                        
+                                if (mysql_query(conn, new_dir_query) == 0) {
+                                    int new_subdir_id = mysql_insert_id(conn);
+                                    
+                                    // Add to next level queue
+                                    if (next_queue_size < 1000) {
+                                        next_src_queue[next_queue_size] = subdir_id;
+                                        next_dst_queue[next_queue_size] = new_subdir_id;
+                                        next_queue_size++;
+                                    }
+                                }
+                            }
+                            mysql_free_result(subdir_res);
+                        }
+                    }
+                }
+                
+                // Swap queues for next level
+                if (next_queue_size > 0) {
+                    int *temp = src_dir_queue;
+                    src_dir_queue = next_src_queue;
+                    next_src_queue = temp;
+                    
+                    temp = dst_dir_queue;
+                    dst_dir_queue = next_dst_queue;
+                    next_dst_queue = temp;
+                    
+                    queue_size = next_queue_size;
+                } else {
+                    queue_size = 0;
+                }
+            }
+            
+            // Clean up
+            free(src_dir_queue);
+            free(dst_dir_queue);
+            free(next_src_queue);
+            free(next_dst_queue);
         }
 
         snprintf(response, sizeof(response), "200\r\n");
         send_response(idx, response);
         return;
     }
-
     // ============================
     // LIST_GROUP_MEMBERS token group_id
     // ============================

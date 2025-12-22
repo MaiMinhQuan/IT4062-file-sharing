@@ -13,7 +13,7 @@ void init_mysql() {
     }
 
     // Thay your_password bằng password của bạn
-    if (mysql_real_connect(conn, "localhost", "root", "your_new_password",
+    if (mysql_real_connect(conn, "localhost", "root", "Nguyenthanh@0504",
                           "file_sharing_system", 0, NULL, 0) == NULL) {
         fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(conn));
         mysql_close(conn);
