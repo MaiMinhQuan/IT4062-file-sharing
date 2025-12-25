@@ -1978,7 +1978,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (strcasecmp(type, "F") == 0) {
             int name_check = file_name_exists_in_dir(new_name, parent_or_dir_id);
             if (name_check == 1) {
-                snprintf(response, sizeof(response), "409\r\n"); // Conflict
+                snprintf(response, sizeof(response), "409\r\n");
                 send_response(idx, response);
                 return;
             } else if (name_check == -1) {
@@ -1989,7 +1989,7 @@ void process_command(int idx, const char *line, int line_len) {
         } else {
             int name_check = dir_name_exists_in_parent(new_name, parent_or_dir_id);
             if (name_check == 1) {
-                snprintf(response, sizeof(response), "409\r\n"); // Conflict
+                snprintf(response, sizeof(response), "409\r\n");
                 send_response(idx, response);
                 return;
             } else if (name_check == -1) {
@@ -2198,7 +2198,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (strcasecmp(type, "F") == 0) {
             int name_check = file_name_exists_in_dir(item_name, target_dir_id);
             if (name_check == 1) {
-                snprintf(response, sizeof(response), "409\r\n"); // Conflict
+                snprintf(response, sizeof(response), "409\r\n");
                 send_response(idx, response);
                 return;
             } else if (name_check == -1) {
@@ -2209,7 +2209,7 @@ void process_command(int idx, const char *line, int line_len) {
         } else {
             int name_check = dir_name_exists_in_parent(item_name, target_dir_id);
             if (name_check == 1) {
-                snprintf(response, sizeof(response), "409\r\n"); // Conflict
+                snprintf(response, sizeof(response), "409\r\n");
                 send_response(idx, response);
                 return;
             } else if (name_check == -1) {
@@ -2395,7 +2395,7 @@ void process_command(int idx, const char *line, int line_len) {
         if (strcasecmp(type, "F") == 0) {
             int name_check = file_name_exists_in_dir(item_name, target_dir_id);
             if (name_check == 1) {
-                snprintf(response, sizeof(response), "409\r\n"); // Conflict
+                snprintf(response, sizeof(response), "409\r\n");
                 send_response(idx, response);
                 return;
             } else if (name_check == -1) {
@@ -2406,7 +2406,7 @@ void process_command(int idx, const char *line, int line_len) {
         } else {
             int name_check = dir_name_exists_in_parent(item_name, target_dir_id);
             if (name_check == 1) {
-                snprintf(response, sizeof(response), "409\r\n"); // Conflict
+                snprintf(response, sizeof(response), "409\r\n");
                 send_response(idx, response);
                 return;
             } else if (name_check == -1) {
@@ -3487,7 +3487,8 @@ void process_command(int idx, const char *line, int line_len) {
         if (chunk_index == 1) {
             int name_check = file_name_exists_in_dir(safe_filename, dir_id);
             if (name_check == 1) {
-                send_upload_error(idx, "Tên file đã tồn tại trong thư mục");
+                snprintf(response, sizeof(response), "409\r\n");
+                send_response(idx, response);
                 return;
             } else if (name_check == -1) {
                 send_upload_error(idx, "Lỗi kiểm tra tên file");

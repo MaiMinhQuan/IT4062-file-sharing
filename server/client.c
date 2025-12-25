@@ -1823,6 +1823,14 @@ void handle_rename_item(int group_id) {
         return;
     }
 
+    // Extract error message if present
+    char *error_msg = strchr(response, ' ');
+    if (error_msg) {
+        while (*error_msg == ' ') error_msg++;
+        char *end_of_status = strchr(error_msg, '\r');
+        if (end_of_status) *end_of_status = '\0';
+    }
+
     switch (status_code) {
         case 200:
             printf("Đổi tên %s (ID: %d) thành '%s' thành công!\n",
@@ -1838,11 +1846,19 @@ void handle_rename_item(int group_id) {
             printf("Không tìm thấy %s với ID: %d!\n",
                    strcasecmp(type, "F") == 0 ? "file" : "thư mục", item_id);
             break;
+        case 409:
+            if (error_msg && *error_msg) {
+                printf("Lỗi: %s\n", error_msg);
+            } else {
+                printf("Tên đã tồn tại trong thư mục đích!\n");
+            }
+            break;
         case 500:
-            printf("Lỗi server!\n");
+            printf("Lỗi server: %s\n", error_msg && *error_msg ? error_msg : "Không xác định");
             break;
         default:
-            printf("Lỗi không xác định (code: %d)\n", status_code);
+            printf("Lỗi không xác định (code: %d)%s%s\n", status_code, 
+                   error_msg ? ": " : "", error_msg ? error_msg : "");
     }
 
     // Connection kept open (using global_sock)
@@ -1932,6 +1948,14 @@ void handle_move_item(int group_id) {
         return;
     }
 
+    // Extract error message if present
+    char *error_msg = strchr(response, ' ');
+    if (error_msg) {
+        while (*error_msg == ' ') error_msg++;
+        char *end_of_status = strchr(error_msg, '\r');
+        if (end_of_status) *end_of_status = '\0';
+    }
+
     switch (status_code) {
         case 200:
             printf("Di chuyển %s (ID: %d) đến thư mục (ID: %d) thành công!\n",
@@ -1947,11 +1971,19 @@ void handle_move_item(int group_id) {
             printf("Không tìm thấy %s hoặc thư mục đích!\n",
                    strcasecmp(type, "F") == 0 ? "file" : "thư mục");
             break;
+        case 409:
+            if (error_msg && *error_msg) {
+                printf("Lỗi: %s\n", error_msg);
+            } else {
+                printf("Tên đã tồn tại trong thư mục đích!\n");
+            }
+            break;
         case 500:
-            printf("Lỗi server!\n");
+            printf("Lỗi server: %s\n", error_msg && *error_msg ? error_msg : "Không xác định");
             break;
         default:
-            printf("Lỗi không xác định (code: %d)\n", status_code);
+            printf("Lỗi không xác định (code: %d)%s%s\n", status_code, 
+                   error_msg ? ": " : "", error_msg ? error_msg : "");
     }
 
     // Connection kept open (using global_sock)
@@ -2033,6 +2065,14 @@ void handle_copy_item(int group_id) {
         return;
     }
 
+    // Extract error message if present
+    char *error_msg = strchr(response, ' ');
+    if (error_msg) {
+        while (*error_msg == ' ') error_msg++;
+        char *end_of_status = strchr(error_msg, '\r');
+        if (end_of_status) *end_of_status = '\0';
+    }
+
     switch (status_code) {
         case 200:
             printf("Sao chép %s (ID: %d) đến thư mục (ID: %d) thành công!\n",
@@ -2048,11 +2088,19 @@ void handle_copy_item(int group_id) {
             printf("Không tìm thấy %s hoặc thư mục đích!\n",
                    strcasecmp(type, "F") == 0 ? "file" : "thư mục");
             break;
+        case 409:
+            if (error_msg && *error_msg) {
+                printf("Lỗi: %s\n", error_msg);
+            } else {
+                printf("Tên đã tồn tại trong thư mục đích!\n");
+            }
+            break;
         case 500:
-            printf("Lỗi server!\n");
+            printf("Lỗi server: %s\n", error_msg && *error_msg ? error_msg : "Không xác định");
             break;
         default:
-            printf("Lỗi không xác định (code: %d)\n", status_code);
+            printf("Lỗi không xác định (code: %d)%s%s\n", status_code, 
+                   error_msg ? ": " : "", error_msg ? error_msg : "");
     }
 
     // Connection kept open (using global_sock)
@@ -2931,7 +2979,7 @@ void handle_upload_file(int group_id) {
         if (file_size > 0) {
             bytes_read = fread(buffer, 1, FILE_CHUNK_SIZE, fp);
             if (bytes_read == 0 && ferror(fp)) {
-                printf("Lỗi đọc file ở chunk %d.\n", chunk_idx);
+                printf("Lỗi khi đọc file tại phần dữ liệu thứ %d.\n", chunk_idx);
                 success = 0;
                 break;
             }
@@ -2939,7 +2987,7 @@ void handle_upload_file(int group_id) {
 
         int enc_len = base64_encode(buffer, bytes_read, base64_buf, sizeof(base64_buf));
         if (enc_len < 0) {
-            printf("Lỗi mã hoá chunk %d.\n", chunk_idx);
+            printf("Lỗi khi mã hoá phần dữ liệu %d.\n", chunk_idx);
             success = 0;
             break;
         }
@@ -2949,18 +2997,18 @@ void handle_upload_file(int group_id) {
                                current_token, group_id, dir_id, filename,
                                chunk_idx, total_chunks, base64_buf);
         if (cmd_len < 0 || cmd_len >= (int)sizeof(command)) {
-            printf("Chunk %d quá lớn để gửi.\n", chunk_idx);
+            printf("Phần dữ liệu %d quá lớn để gửi.\n", chunk_idx);
             success = 0;
             break;
         }
 
         if (send(sock, command, cmd_len, 0) < 0) {
-            printf("Không gửi được chunk %d: %s\n", chunk_idx, strerror(errno));
+            printf("Không thể gửi phần dữ liệu %d: %s\n", chunk_idx, strerror(errno));
             success = 0;
             break;
         }
 
-        char response[256];
+        char response[1024];
         int bytes = recv(sock, response, sizeof(response) - 1, 0);
         if (bytes <= 0) {
             printf("Không nhận được phản hồi cho chunk %d.\n", chunk_idx);
@@ -2969,37 +3017,81 @@ void handle_upload_file(int group_id) {
         }
         response[bytes] = '\0';
 
-        if (strncmp(response, "500", 3) == 0) {
-            printf("Server trả lỗi 500 ở chunk %d.\n", chunk_idx);
-            success = 0;
-            break;
-        }
-
+        // Parse the status code from the response
         int status = 0;
         int resp_chunk = 0;
         int resp_total = 0;
+        
+        // Try to parse the response with status code and chunk info
         int parsed = sscanf(response, "%d %d/%d", &status, &resp_chunk, &resp_total);
+        
         if (parsed < 1) {
-            printf("Phản hồi không hợp lệ: %s\n", response);
+            printf("Phản hồi không hợp lệ từ server.\n");
             success = 0;
             break;
         }
 
-        if (status == 202) {
-            printf("Đã gửi chunk %d/%d.\n", resp_chunk, resp_total);
-        } else if (status == 200) {
-            printf("✓ Upload hoàn tất (%d/%d).\n", resp_chunk, resp_total);
-        } else {
-            printf("Server trả mã %d cho chunk %d.\n", status, chunk_idx);
-            success = 0;
-            break;
+        // Handle specific status codes
+        switch (status) {
+            case 200: // Upload completed successfully
+                printf("✓ Đã tải lên phần cuối (%d/%d).\n", resp_chunk, resp_total);
+                break;
+                
+            case 202: // Chunk received, more to come
+                printf("Đã gửi phần dữ liệu %d/%d...\n", resp_chunk, resp_total);
+                break;
+                
+            case 400: // Bad request
+            case 401: // Unauthorized
+            case 403: // Forbidden
+            case 404: // Not found
+            case 409: // Conflict (duplicate file)
+            case 500: // Server error
+            default:  // Other error codes
+                // Extract error message if available
+                char *error_msg = strchr(response, ' ');
+
+                // If server returned 409 (Conflict), treat it as "already exists"
+                if (status == 409) {
+                    printf("Lỗi: Tệp/thư mục đã tồn tại trong thư mục đích\n");
+                } else if (error_msg) {
+                    // Skip the status code and any extra spaces
+                    while (*error_msg == ' ') error_msg++;
+                    // Find the end of the message (before CRLF if present)
+                    char *end_of_status = strchr(error_msg, '\r');
+                    if (!end_of_status) end_of_status = strchr(error_msg, '\n');
+                    if (end_of_status) *end_of_status = '\0';
+
+                    // Print appropriate error message based on status
+                    if (status == 400) {
+                        printf("Lỗi: Yêu cầu không hợp lệ - %s\n", error_msg && *error_msg ? error_msg : "Vui lòng kiểm tra lại thông tin");
+                    } else if (status == 401) {
+                        printf("Lỗi: Chưa đăng nhập hoặc phiên làm việc đã hết hạn\n");
+                    } else if (status == 403) {
+                        printf("Lỗi: Không có quyền thực hiện thao tác này\n");
+                    } else if (status == 404) {
+                        printf("Lỗi: Không tìm thấy tài nguyên yêu cầu\n");
+                    } else if (status == 500) {
+                        printf("Lỗi: Lỗi máy chủ - %s\n", error_msg && *error_msg ? error_msg : "Vui lòng thử lại sau");
+                    } else {
+                        printf("Lỗi %d: %s\n", status, error_msg && *error_msg ? error_msg : "Lỗi không xác định");
+                    }
+                } else {
+                    // No message provided by server and not a handled status above
+                    printf("Lỗi %d: Lỗi không xác định, vui lòng thử lại\n", status);
+                }
+                success = 0;
+                goto upload_cleanup;
         }
     }
 
+upload_cleanup:
     fclose(fp);
 
     if (!success) {
-        printf("✗ Upload thất bại.\n");
+        // Error message already printed in the switch statement
+    } else {
+        printf("✓ Upload hoàn tất thành công.\n");
     }
 }
 
