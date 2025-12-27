@@ -1272,15 +1272,21 @@ void handle_list_members(int group_id) {
     }
     response[bytes] = '\0';
 
-    // Parse response
-    char *crlf = strstr(response, "\r\n");
-    if (crlf) *crlf = '\0';
+    // Parse response - Format: "200 <total>\r\n<username>|<role>\r\n..."
+    char *line_start = response;
+    char *first_crlf = strstr(line_start, "\r\n");
+    if (!first_crlf) {
+        printf("Phản hồi không hợp lệ!\n");
+        return;
+    }
 
+    // Extract first line
+    *first_crlf = '\0';
     int status_code = 0;
+    int member_count = 0;
 
-    // Response format: "200 username||role<SPACE>... group_id\r\n"
-    if (sscanf(response, "%d", &status_code) < 1) {
-        printf("Phản hồi không hợp lệ: %s\n", response);
+    if (sscanf(line_start, "%d %d", &status_code, &member_count) < 1) {
+        printf("Phản hồi không hợp lệ: %s\n", line_start);
         return;
     }
 
@@ -1307,31 +1313,15 @@ void handle_list_members(int group_id) {
         return;
     }
 
-    // Parse members data
-    // Format: "200 username||role username||role ... group_id"
-    char *members_start = strchr(response, ' ');
-    if (!members_start) {
-        printf("Không tìm thấy dữ liệu thành viên.\n");
-        return;
-    }
-    members_start++; // Skip the space after status code
-
-    // Đếm số thành viên
-    int member_count = 0;
-    char *temp = strdup(members_start);
-    char *token = strtok(temp, " ");
-    while (token) {
-        if (strchr(token, '|')) {
-            member_count++;
-        }
-        token = strtok(NULL, " ");
-    }
-    free(temp);
-
     printf("\n┌────────────────────────────────────────────┐\n");
     printf("│         DANH SÁCH THÀNH VIÊN NHÓM #%-3d     │\n", group_id);
     printf("└────────────────────────────────────────────┘\n");
     printf("\nTổng số thành viên: %d\n\n", member_count);
+
+    if (member_count == 0) {
+        printf("Nhóm không có thành viên nào.\n");
+        return;
+    }
 
     const char *table_border =
         "┌──────────────────────────────┬──────────────┐\n";
@@ -1344,42 +1334,33 @@ void handle_list_members(int group_id) {
     printf("│ %-28s │ %-12s │\n", "Username", "Role");
     printf("%s", table_separator);
 
-    // Parse và hiển thị từng thành viên
-    temp = strdup(members_start);
-    token = strtok(temp, " ");
-    while (token) {
-        if (strchr(token, '|')) {
-            // Tạo bản sao để parse username và role
-            char token_copy[256];
-            strncpy(token_copy, token, sizeof(token_copy) - 1);
-            token_copy[sizeof(token_copy) - 1] = '\0';
+    // Parse members - Format: <username>|<role>\r\n per line
+    char *member_data = first_crlf + 2; // Skip first \r\n
+    char *line_end;
 
-            char *separator = strchr(token_copy, '|');
-            if (separator) {
-                *separator = '\0';
-                char *username = token_copy;
-                char *role = separator + 1;
+    while ((line_end = strstr(member_data, "\r\n")) != NULL) {
+        *line_end = '\0';
 
-                // Tìm separator thứ 2 nếu có (cho trường hợp username||role)
-                char *second_sep = strchr(role, '|');
-                if (second_sep) {
-                    *second_sep = '\0';
-                    role = second_sep + 1;
-                }
+        // Parse line: username|role
+        char *pipe = strchr(member_data, '|');
+        if (pipe) {
+            *pipe = '\0';
+            char *username = member_data;
+            char *role = pipe + 1;
 
-                if (username && role && strlen(username) > 0 && strlen(role) > 0) {
-                    // Hiển thị với icon cho role
-                    if (strcmp(role, "admin") == 0) {
-                        printf("│ %-28s │  Admin       │\n", username);
-                    } else {
-                        printf("│ %-28s │  Member      │\n", username);
-                    }
+            if (strlen(username) > 0 && strlen(role) > 0) {
+                // Hiển thị với định dạng cho role
+                if (strcmp(role, "admin") == 0) {
+                    printf("│ %-28s │  Admin       │\n", username);
+                } else {
+                    printf("│ %-28s │  Member      │\n", username);
                 }
             }
         }
-        token = strtok(NULL, " ");
+
+        member_data = line_end + 2; // Move to next line
+        if (*member_data == '\0') break;
     }
-    free(temp);
 
     printf("%s", table_bottom);
 }
@@ -1508,35 +1489,26 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
         response[bytes] = '\0';
 
         // Parse response
-        char *crlf = strstr(response, "\r\n");
-        if (crlf) *crlf = '\0';
-
+        // Format: "200 current_dir_id parent_dir_id\nD|id|name\nF|id|name|size\n...\r\n"
         int status_code = 0;
         int current_dir_id = 0;
         int parent_dir_id = 0;
-        char *data_start = NULL;
 
-        // Parse: "200 current_dir_id parent_dir_id D|..."
+        // Parse first line: "200 current_dir_id parent_dir_id"
         char *ptr = response;
+        char *first_newline = strchr(ptr, '\n');
+        if (first_newline) {
+            *first_newline = '\0';  // Tách dòng đầu
+        }
+
         if (sscanf(ptr, "%d %d %d", &status_code, &current_dir_id, &parent_dir_id) < 2) {
             printf("Phản hồi không hợp lệ: %s\n", response);
     // Connection kept open (using global_sock)
             return;
         }
 
-        // Tìm vị trí bắt đầu của data (sau 3 số)
-        int space_count = 0;
-        for (char *p = response; *p; p++) {
-            if (*p == ' ') {
-                space_count++;
-                if (space_count == 3) {
-                    data_start = p + 1;
-                    break;
-                }
-            }
-        }
-
-        char *content_start = data_start ? data_start : "";
+        // Content starts after first newline
+        char *content_start = first_newline ? (first_newline + 1) : "";
 
         if (status_code != 200) {
             switch (status_code) {
@@ -1576,56 +1548,60 @@ void handle_list_folder_content(int group_id, int dir_id, int is_admin) {
         // Đếm folders và files
         int folder_count = 0;
         int file_count = 0;
+
+        // Parse items - each line is one item: D|id|name or F|id|name|size
         char *temp = strdup(content_start);
-        char *token = strtok(temp, " ");
+        char *line = strtok(temp, "\n\r");
 
-        while (token && item_count < 1000) {
-            if (strchr(token, '|')) {
-                char token_copy[512];
-                strncpy(token_copy, token, sizeof(token_copy) - 1);
-                token_copy[sizeof(token_copy) - 1] = '\0';
+        while (line && item_count < 1000) {
+            // Skip empty lines
+            if (strlen(line) == 0) {
+                line = strtok(NULL, "\n\r");
+                continue;
+            }
 
-                char *parts[4] = {NULL, NULL, NULL, NULL};
-                int part_count = 0;
+            // Parse line: "D|id|name" or "F|id|name|size"
+            char *parts[4] = {NULL, NULL, NULL, NULL};
+            int part_count = 0;
 
-                char *p = token_copy;
-                char *start = p;
-                while (*p && part_count < 4) {
-                    if (*p == '|') {
-                        *p = '\0';
-                        parts[part_count++] = start;
-                        start = p + 1;
-                    }
-                    p++;
-                }
-                if (start && *start) {
+            char *p = line;
+            char *start = p;
+            while (*p && part_count < 4) {
+                if (*p == '|') {
+                    *p = '\0';
                     parts[part_count++] = start;
+                    start = p + 1;
                 }
+                p++;
+            }
+            if (start && *start) {
+                parts[part_count++] = start;
+            }
 
-                if (part_count >= 2) {
-                    char *type = parts[0];
-                    char *id_str = parts[1];
-                    char *name = parts[2] ? parts[2] : "?";
-                    char *size = parts[3] ? parts[3] : "0";
+            if (part_count >= 2) {
+                char *type = parts[0];
+                char *id_str = parts[1];
+                char *name = parts[2] ? parts[2] : "?";
+                char *size_str = parts[3] ? parts[3] : "0";
 
-                    if (strcmp(type, "D") == 0 && strcmp(name, "..") != 0 && strcmp(name, "ROOT") != 0) {
-                        items[item_count].type = 'D';
-                        items[item_count].id = atoi(id_str);
-                        strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
-                        items[item_count].size = 0;
-                        item_count++;
-                        folder_count++;
-                    } else if (strcmp(type, "F") == 0) {
-                        items[item_count].type = 'F';
-                        items[item_count].id = atoi(id_str);
-                        strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
-                        items[item_count].size = atoll(size);
-                        item_count++;
-                        file_count++;
-                    }
+                if (strcmp(type, "D") == 0 && strcmp(name, "..") != 0 && strcmp(name, "ROOT") != 0) {
+                    items[item_count].type = 'D';
+                    items[item_count].id = atoi(id_str);
+                    strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
+                    items[item_count].size = 0;
+                    item_count++;
+                    folder_count++;
+                } else if (strcmp(type, "F") == 0) {
+                    items[item_count].type = 'F';
+                    items[item_count].id = atoi(id_str);
+                    strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
+                    items[item_count].size = atoll(size_str);
+                    item_count++;
+                    file_count++;
                 }
             }
-            token = strtok(NULL, " ");
+
+            line = strtok(NULL, "\n\r");
         }
         free(temp);
 
@@ -1857,7 +1833,7 @@ void handle_rename_item(int group_id) {
             printf("Lỗi server: %s\n", error_msg && *error_msg ? error_msg : "Không xác định");
             break;
         default:
-            printf("Lỗi không xác định (code: %d)%s%s\n", status_code, 
+            printf("Lỗi không xác định (code: %d)%s%s\n", status_code,
                    error_msg ? ": " : "", error_msg ? error_msg : "");
     }
 
@@ -1982,7 +1958,7 @@ void handle_move_item(int group_id) {
             printf("Lỗi server: %s\n", error_msg && *error_msg ? error_msg : "Không xác định");
             break;
         default:
-            printf("Lỗi không xác định (code: %d)%s%s\n", status_code, 
+            printf("Lỗi không xác định (code: %d)%s%s\n", status_code,
                    error_msg ? ": " : "", error_msg ? error_msg : "");
     }
 
@@ -2099,7 +2075,7 @@ void handle_copy_item(int group_id) {
             printf("Lỗi server: %s\n", error_msg && *error_msg ? error_msg : "Không xác định");
             break;
         default:
-            printf("Lỗi không xác định (code: %d)%s%s\n", status_code, 
+            printf("Lỗi không xác định (code: %d)%s%s\n", status_code,
                    error_msg ? ": " : "", error_msg ? error_msg : "");
     }
 
@@ -2677,16 +2653,15 @@ void handle_view_my_invitations() {
             response[len-2] = '\0';
         }
 
-        // Parse response: "200 [invitation_1] [invitation_2] ..."
+        // Parse response: "200 <total>\r\n<request_id> <group_id> <group_name>\r\n..."
         int status_code = 0;
-        char cmd_name[50];
-        char invitations_data[BUFFER_SIZE] = {0};
+        int total_invitations = 0;
 
-        // Parse ít nhất status_code và cmd_name
-        int parsed = sscanf(response, "%d %[^\n]", &status_code, invitations_data);
+        // Parse status code and total count
+        char *line = response;
+        int parsed = sscanf(line, "%d %d", &status_code, &total_invitations);
         if (parsed < 1) {
             printf("Phản hồi không hợp lệ từ server.\n");
-            printf("Debug: response = \n", response);
             return;
         }
 
@@ -2700,96 +2675,84 @@ void handle_view_my_invitations() {
             return;
         }
 
-        if (strlen(invitations_data) == 0 || strstr(invitations_data, "[invitation_") == NULL) {
+        if (total_invitations == 0) {
             printf("\nBạn không có lời mời nào đang chờ xử lý.\n");
             return;
         }
 
         printf("\nDANH SÁCH LỜI MỜI:\n\n");
-        printf("┌────────────┬──────────┬───────────────────────────────┬──────────────┐\n");
-        printf("│ Request ID │ Group ID │ Tên nhóm                      │ Trạng thái   │\n");
-        printf("├────────────┼──────────┼───────────────────────────────┼──────────────┤\n");
+        printf("┌────────────┬──────────┬──────────────────────┬────────────────────────────────┐\n");
+        printf("│ Request ID │ Group ID │ Tên nhóm             │ Mô tả                          │\n");
+        printf("├────────────┼──────────┼──────────────────────┼────────────────────────────────┤\n");
 
-        // Parse invitations: [invitation_n]: group_id group_name request_id request_status
-        char *ptr = invitations_data;
+        // Move to next line (skip first line with status and count)
+        char *ptr = strchr(line, '\n');
+        if (!ptr) {
+            printf("\nBạn không có lời mời nào đang chờ xử lý.\n");
+            return;
+        }
+        ptr++; // Skip the newline
+
         int invitation_count = 0;
+        // Parse each invitation line: "<request_id>|<group_id>|<group_name>|<description>\r\n"
+        while (*ptr && invitation_count < total_invitations) {
+            // Skip any leading whitespace
+            while (*ptr && (*ptr == '\r' || *ptr == '\n' || *ptr == ' ')) ptr++;
+            if (!*ptr) break;
 
-        while (*ptr) {
-            // Find next invitation marker
-            char *inv_start = strstr(ptr, "[invitation_");
-            if (!inv_start) break;
+            // Find end of line
+            char *line_end = ptr;
+            while (*line_end && *line_end != '\r' && *line_end != '\n') line_end++;
 
-            // Find the colon after invitation marker
-            char *colon = strchr(inv_start, ':');
-            if (!colon) break;
-
-            // Parse: group_id group_name request_id request_status
-            // Copy data để parse (vì sẽ modify chuỗi)
+            // Copy line to buffer
             char line_buf[512];
-            char *data = colon + 1;
-            while (*data == ' ') data++; // Skip leading spaces
+            size_t line_len = line_end - ptr;
+            if (line_len >= sizeof(line_buf)) line_len = sizeof(line_buf) - 1;
+            memcpy(line_buf, ptr, line_len);
+            line_buf[line_len] = '\0';
 
-            strncpy(line_buf, data, sizeof(line_buf) - 1);
-            line_buf[sizeof(line_buf) - 1] = '\0';
+            // Parse: request_id|group_id|group_name|description
+            int request_id = 0;
+            int group_id = 0;
+            char group_name[256] = {0};
+            char description[256] = {0};
 
-            // Loại bỏ khoảng trắng/newline ở cuối
-            size_t len = strlen(line_buf);
-            while (len > 0 && (line_buf[len-1] == ' ' || line_buf[len-1] == '\n' ||
-                              line_buf[len-1] == '\r' || line_buf[len-1] == '\t')) {
-                line_buf[--len] = '\0';
+            // Parse using pipe separator
+            char *token_ptr = line_buf;
+            char *pipe1 = strchr(token_ptr, '|');
+            if (pipe1) {
+                *pipe1 = '\0';
+                request_id = atoi(token_ptr);
+
+                char *pipe2 = strchr(pipe1 + 1, '|');
+                if (pipe2) {
+                    *pipe2 = '\0';
+                    group_id = atoi(pipe1 + 1);
+
+                    char *pipe3 = strchr(pipe2 + 1, '|');
+                    if (pipe3) {
+                        *pipe3 = '\0';
+                        strncpy(group_name, pipe2 + 1, sizeof(group_name) - 1);
+                        group_name[sizeof(group_name) - 1] = '\0';
+
+                        // Description is the rest
+                        strncpy(description, pipe3 + 1, sizeof(description) - 1);
+                        description[sizeof(description) - 1] = '\0';
+                    }
+                }
             }
 
-            if (len == 0) {
-                ptr = colon + 1;
-                while (*ptr && *ptr != '[') ptr++;
-                continue;
+            if (request_id > 0 && group_id > 0) {
+                printf("│ %-10d │ %-8d │ %-20.20s │ %-30.30s │\n",
+                       request_id, group_id, group_name, description);
+                invitation_count++;
             }
 
-            // Bây giờ parse: "6 code java 7 pending"
-            // Tìm status (từ cuối cùng)
-            char *last_space = strrchr(line_buf, ' ');
-            if (!last_space) {
-                ptr = colon + 1;
-                while (*ptr && *ptr != '[') ptr++;
-                continue;
-            }
-
-            char status[32];
-            strncpy(status, last_space + 1, sizeof(status) - 1);
-            status[sizeof(status) - 1] = '\0';
-            *last_space = '\0'; // Cắt chuỗi: "6 code java 7"
-
-            // Tìm request_id (từ cuối cùng của chuỗi còn lại)
-            char *second_last_space = strrchr(line_buf, ' ');
-            if (!second_last_space) {
-                ptr = colon + 1;
-                while (*ptr && *ptr != '[') ptr++;
-                continue;
-            }
-
-            int request_id = atoi(second_last_space + 1);
-            *second_last_space = '\0'; // Cắt chuỗi: "6 code java"
-
-            // Parse group_id (số đầu tiên)
-            int group_id = atoi(line_buf);
-
-            // Group name là phần còn lại sau group_id
-            char *group_name_start = line_buf;
-            while (*group_name_start && isdigit(*group_name_start)) {
-                group_name_start++;
-            }
-            while (*group_name_start == ' ') group_name_start++;
-
-            printf("│ %-10d │ %-8d │ %-29.29s │ %-12s │\n",
-                   request_id, group_id, group_name_start, status);
-            invitation_count++;
-
-            // Move to next invitation
-            ptr = colon + 1;
-            while (*ptr && *ptr != '[') ptr++;
+            // Move to next line
+            ptr = line_end;
         }
 
-        printf("└────────────┴──────────┴───────────────────────────────┴──────────────┘\n");
+        printf("└────────────┴──────────┴──────────────────────┴────────────────────────────────┘\n");
 
         if (invitation_count == 0) {
             printf("\nBạn không có lời mời nào đang chờ xử lý.\n");
@@ -3021,10 +2984,10 @@ void handle_upload_file(int group_id) {
         int status = 0;
         int resp_chunk = 0;
         int resp_total = 0;
-        
+
         // Try to parse the response with status code and chunk info
         int parsed = sscanf(response, "%d %d/%d", &status, &resp_chunk, &resp_total);
-        
+
         if (parsed < 1) {
             printf("Phản hồi không hợp lệ từ server.\n");
             success = 0;
@@ -3036,18 +2999,18 @@ void handle_upload_file(int group_id) {
             case 200: // Upload completed successfully
                 printf("✓ Đã tải lên phần cuối (%d/%d).\n", resp_chunk, resp_total);
                 break;
-                
+
             case 202: // Chunk received, more to come
                 printf("Đã gửi phần dữ liệu %d/%d...\n", resp_chunk, resp_total);
                 break;
-                
+
             case 400: // Bad request
             case 401: // Unauthorized
             case 403: // Forbidden
             case 404: // Not found
             case 409: // Conflict (duplicate file)
             case 500: // Server error
-            default:  // Other error codes
+            default: { // Other error codes
                 // Extract error message if available
                 char *error_msg = strchr(response, ' ');
 
@@ -3082,6 +3045,7 @@ void handle_upload_file(int group_id) {
                 }
                 success = 0;
                 goto upload_cleanup;
+            }
         }
     }
 
